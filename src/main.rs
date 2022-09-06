@@ -31,11 +31,96 @@ impl Vertex {
     }
 }
 
+struct QuadRenderer {
+    texture_width: u32,
+    texture_height: u32,
+    quad_width: u32,
+    quad_height: u32,
+}
+
+impl QuadRenderer {
+    pub fn update(
+        &mut self,
+        texture_width: u32,
+        texture_height: u32,
+        quad_width: u32,
+        quad_height: u32,
+    ) -> bool {
+        let mut changed = false;
+        if texture_width != self.texture_width {
+            self.texture_width = texture_width;
+            changed = true;
+        }
+        if texture_height != self.texture_height {
+            self.texture_height = texture_height;
+            changed = true;
+        }
+        if quad_width != self.quad_width {
+            self.quad_width = quad_width;
+            changed = true;
+        }
+        if quad_height != self.quad_height {
+            self.quad_height = quad_height;
+            changed = true;
+        }
+
+        return changed;
+    }
+
+    pub fn get_vertices(&self) -> [Vertex; 4] {
+        let texture_ratio = 0.5 * self.texture_width as f32 / self.texture_height as f32;
+        let quad_ratio = self.quad_width as f32 / self.quad_height as f32;
+
+        let texture_crop = texture_ratio / quad_ratio;
+
+        if texture_crop > 1. {
+            let quad_y = 1.0 - 2.0 * (1.0 / texture_crop);
+            return [
+                Vertex {
+                    position: [-1.0, 1.0, 0.0],
+                    tex_coords: [0.0, 0.0],
+                }, // A
+                Vertex {
+                    position: [1.0, 1.0, 0.0],
+                    tex_coords: [1.0, 0.0],
+                }, // B
+                Vertex {
+                    position: [1.0, quad_y, 0.0],
+                    tex_coords: [1.0, 1.0],
+                }, // C
+                Vertex {
+                    position: [-1.0, quad_y, 0.0],
+                    tex_coords: [0.0, 1.0],
+                }, // D
+            ];
+        } else {
+            return [
+                Vertex {
+                    position: [-1.0, 1.0, 0.0],
+                    tex_coords: [0.0, 0.0],
+                }, // A
+                Vertex {
+                    position: [1.0, 1.0, 0.0],
+                    tex_coords: [1.0, 0.0],
+                }, // B
+                Vertex {
+                    position: [1.0, -1.0, 0.0],
+                    tex_coords: [1.0, texture_crop],
+                }, // C
+                Vertex {
+                    position: [-1.0, -1.0, 0.0],
+                    tex_coords: [0.0, texture_crop],
+                }, // D
+            ];
+        }
+    }
+}
+
 //
 // position coordinates   texture coordinates
 // frame                  frame
 //
-//         -1             0 ------ -----> 1
+//  A       1       B     0 ------ -----> 1
 //          ^             |
 //          |             |
 //          |             |
@@ -43,16 +128,16 @@ impl Vertex {
 //          |             |
 //          |             |
 //          v             v
-//         -1             1
+//  D      -1       C     1
 //
 const VERTICES: &[Vertex] = &[
     Vertex {
-        position: [1.0, 1.0, 0.0],
-        tex_coords: [1.0, 0.0],
-    }, // A
-    Vertex {
         position: [-1.0, 1.0, 0.0],
         tex_coords: [0.0, 0.0],
+    }, // A
+    Vertex {
+        position: [1.0, 1.0, 0.0],
+        tex_coords: [1.0, 0.0],
     }, // B
     Vertex {
         position: [1.0, -1.0, 0.0],
@@ -64,7 +149,8 @@ const VERTICES: &[Vertex] = &[
     }, // D
 ];
 
-const INDICES: &[u16] = &[0, 1, 2, 1, 3, 2];
+//                        A  C  B  A  D  C
+const INDICES: &[u16] = &[0, 2, 1, 0, 3, 2];
 
 struct State {
     surface: wgpu::Surface,
@@ -79,6 +165,8 @@ struct State {
 
     bind_group_layout: wgpu::BindGroupLayout,
     bind_group: Option<wgpu::BindGroup>,
+    texture: Option<wgpu::Texture>,
+    renderer: Option<QuadRenderer>,
 
     color_r: f64,
 }
@@ -190,7 +278,7 @@ impl State {
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),
             contents: bytemuck::cast_slice(VERTICES),
-            usage: wgpu::BufferUsages::VERTEX,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
         let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Index Buffer"),
@@ -211,6 +299,8 @@ impl State {
             num_indices,
             bind_group: None,
             bind_group_layout: texture_bind_group_layout,
+            texture: None,
+            renderer: None,
             color_r: 0.3,
         }
     }
@@ -234,8 +324,10 @@ impl State {
         }
     }
 
-    fn update(&mut self) {
-        //
+    fn update(&mut self, texture_height: u32, texture_width: u32, winwidth: u32, winheight: u32) {
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.update(texture_width, texture_height, winwidth, winheight);
+        }
     }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -274,6 +366,12 @@ impl State {
                 render_pass.set_bind_group(0, &bind_group, &[]);
             }
 
+            if let Some(renderer) = &self.renderer {
+                let vertices = renderer.get_vertices();
+                self.queue
+                    .write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+            }
+
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
@@ -285,25 +383,34 @@ impl State {
         Ok(())
     }
 
-    fn create_texture(&mut self, pixmap: &mupdf::Pixmap) {
+    fn create_texture(&mut self, pixmap: &mupdf::Pixmap, winwidth: u32, winheight: u32) {
         let texture_size = wgpu::Extent3d {
             width: pixmap.width(),
             height: pixmap.height(),
             depth_or_array_layers: 1,
         };
-        let diffuse_texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            size: texture_size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            label: Some("Pixmap Texture"),
-        });
+        if let None = &self.texture {
+            self.texture = Some(self.device.create_texture(&wgpu::TextureDescriptor {
+                size: texture_size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                label: Some("Pixmap Texture"),
+            }));
+            self.renderer = Some(QuadRenderer {
+                texture_height: texture_size.height,
+                texture_width: texture_size.width,
+                quad_width: winwidth,
+                quad_height: winheight,
+            });
+        }
 
+        let diffuse_texture = self.texture.as_ref().unwrap();
         self.queue.write_texture(
             wgpu::ImageCopyTexture {
-                texture: &diffuse_texture,
+                texture: diffuse_texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -317,34 +424,36 @@ impl State {
             texture_size,
         );
 
-        let diffuse_texture_view =
-            diffuse_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let diffuse_sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
-            ..Default::default()
-        });
+        if let None = self.bind_group {
+            let diffuse_texture_view =
+                diffuse_texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let diffuse_sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                address_mode_w: wgpu::AddressMode::ClampToEdge,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Nearest,
+                mipmap_filter: wgpu::FilterMode::Nearest,
+                ..Default::default()
+            });
 
-        let diffuse_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &self.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&diffuse_texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&diffuse_sampler),
-                },
-            ],
-            label: Some("Pixmap Texture Bind Group"),
-        });
+            let diffuse_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                layout: &self.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&diffuse_texture_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&diffuse_sampler),
+                    },
+                ],
+                label: Some("Pixmap Texture Bind Group"),
+            });
 
-        self.bind_group = Some(diffuse_bind_group);
+            self.bind_group = Some(diffuse_bind_group);
+        }
     }
 }
 
@@ -359,7 +468,10 @@ async fn run() {
     };
 
     let event_loop = EventLoop::new();
-    let window = WindowBuilder::new().build(&event_loop).unwrap();
+    let window = WindowBuilder::new()
+        .with_inner_size(winit::dpi::PhysicalSize::new(420, 180))
+        .build(&event_loop)
+        .unwrap();
 
     let mut state = State::new(&window).await;
 
@@ -368,11 +480,13 @@ async fn run() {
     let mut page_count = 0;
     let total_page_count = doc.page_count().unwrap();
     let page = doc.load_page(page_count).unwrap();
-    let mat = mupdf::Matrix::new_scale(1., 1.);
+    let mat = mupdf::Matrix::new_scale(2., 2.);
+
     let pixmap = page
         .to_pixmap(&mat, &Colorspace::device_rgb(), 1., false)
         .unwrap();
-    state.create_texture(&pixmap);
+    let winsize = window.inner_size();
+    state.create_texture(&pixmap, winsize.width, winsize.height);
 
     event_loop.run(move |event, _, control_flow| match event {
         Event::WindowEvent {
@@ -406,7 +520,8 @@ async fn run() {
                         let pixmap = page
                             .to_pixmap(&mat, &Colorspace::device_rgb(), 1., false)
                             .unwrap();
-                        state.create_texture(&pixmap);
+                        let winsize = window.inner_size();
+                        state.create_texture(&pixmap, winsize.width, winsize.height);
                     }
                     WindowEvent::KeyboardInput {
                         input:
@@ -423,7 +538,8 @@ async fn run() {
                         let pixmap = page
                             .to_pixmap(&mat, &Colorspace::device_rgb(), 1., false)
                             .unwrap();
-                        state.create_texture(&pixmap);
+                        let winsize = window.inner_size();
+                        state.create_texture(&pixmap, winsize.width, winsize.height);
                     }
                     WindowEvent::Resized(physical_size) => {
                         state.resize(*physical_size);
@@ -436,7 +552,13 @@ async fn run() {
             }
         }
         Event::RedrawRequested(window_id) if window_id == window.id() => {
-            state.update();
+            let winsize = window.inner_size();
+            state.update(
+                pixmap.width(),
+                pixmap.height(),
+                winsize.width,
+                winsize.height,
+            );
             match state.render() {
                 Ok(_) => {}
 
