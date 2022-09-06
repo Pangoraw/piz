@@ -1,9 +1,70 @@
-use log::info;
+use std::io::Write;
+
+use mupdf::Colorspace;
+use wgpu::{include_wgsl, util::DeviceExt};
 use winit::{
     event::*,
     event_loop::{ControlFlow, EventLoop},
     window::{Window, WindowBuilder},
 };
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct Vertex {
+    position: [f32; 3],
+    tex_coords: [f32; 2],
+}
+
+unsafe impl bytemuck::Pod for Vertex {}
+unsafe impl bytemuck::Zeroable for Vertex {}
+
+impl Vertex {
+    const ATTRIBS: [wgpu::VertexAttribute; 2] =
+        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2];
+
+    fn desc<'a>() -> wgpu::VertexBufferLayout<'a> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &Self::ATTRIBS,
+        }
+    }
+}
+
+//
+// position coordinates   texture coordinates
+// frame                  frame
+//
+//         -1             0 ------ -----> 1
+//          ^             |
+//          |             |
+//          |             |
+// -1 <---- 0 ----> 1     |
+//          |             |
+//          |             |
+//          v             v
+//         -1             1
+//
+const VERTICES: &[Vertex] = &[
+    Vertex {
+        position: [1.0, 1.0, 0.0],
+        tex_coords: [1.0, 0.0],
+    }, // A
+    Vertex {
+        position: [-1.0, 1.0, 0.0],
+        tex_coords: [0.0, 0.0],
+    }, // B
+    Vertex {
+        position: [1.0, -1.0, 0.0],
+        tex_coords: [1.0, 1.0],
+    }, // C
+    Vertex {
+        position: [-1.0, -1.0, 0.0],
+        tex_coords: [0.0, 1.0],
+    }, // D
+];
+
+const INDICES: &[u16] = &[0, 1, 2, 1, 3, 2];
 
 struct State {
     surface: wgpu::Surface,
@@ -11,6 +72,13 @@ struct State {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     size: winit::dpi::PhysicalSize<u32>,
+    render_pipeline: wgpu::RenderPipeline,
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    num_indices: u32,
+
+    bind_group_layout: wgpu::BindGroupLayout,
+    bind_group: Option<wgpu::BindGroup>,
 
     color_r: f64,
 }
@@ -47,6 +115,89 @@ impl State {
             height: size.height,
             present_mode: wgpu::PresentMode::Fifo,
         };
+        surface.configure(&device, &config);
+
+        let shader = device.create_shader_module(include_wgsl!("shader.wgsl"));
+        let texture_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+                label: Some("Pixmap Texture Bind Group Layout"),
+            });
+        let render_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Render Pipeline Layout"),
+                bind_group_layouts: &[&texture_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Render Pipeline"),
+            layout: Some(&render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_main",
+                buffers: &[Vertex::desc()],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent::OVER,
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+        });
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Vertex Buffer"),
+            contents: bytemuck::cast_slice(VERTICES),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Index Buffer"),
+            contents: bytemuck::cast_slice(INDICES),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        let num_indices = INDICES.len() as u32;
 
         Self {
             surface,
@@ -54,6 +205,12 @@ impl State {
             queue,
             config,
             size,
+            render_pipeline,
+            vertex_buffer,
+            index_buffer,
+            num_indices,
+            bind_group: None,
+            bind_group_layout: texture_bind_group_layout,
             color_r: 0.3,
         }
     }
@@ -94,7 +251,7 @@ impl State {
             });
 
         {
-            let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Path"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
@@ -103,7 +260,7 @@ impl State {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: self.color_r,
                             g: 0.2,
-                            b: 0.3,
+                            b: 0.2,
                             a: 1.0,
                         }),
                         store: true,
@@ -111,6 +268,15 @@ impl State {
                 })],
                 depth_stencil_attachment: None,
             });
+
+            render_pass.set_pipeline(&self.render_pipeline);
+            if let Some(bind_group) = &self.bind_group {
+                render_pass.set_bind_group(0, &bind_group, &[]);
+            }
+
+            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -118,14 +284,95 @@ impl State {
 
         Ok(())
     }
+
+    fn create_texture(&mut self, pixmap: &mupdf::Pixmap) {
+        let texture_size = wgpu::Extent3d {
+            width: pixmap.width(),
+            height: pixmap.height(),
+            depth_or_array_layers: 1,
+        };
+        let diffuse_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            size: texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            label: Some("Pixmap Texture"),
+        });
+
+        self.queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &diffuse_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            pixmap.samples(),
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: std::num::NonZeroU32::new(4 * pixmap.width()),
+                rows_per_image: std::num::NonZeroU32::new(pixmap.height()),
+            },
+            texture_size,
+        );
+
+        let diffuse_texture_view =
+            diffuse_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let diffuse_sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let diffuse_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&diffuse_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&diffuse_sampler),
+                },
+            ],
+            label: Some("Pixmap Texture Bind Group"),
+        });
+
+        self.bind_group = Some(diffuse_bind_group);
+    }
 }
 
 async fn run() {
     env_logger::init();
+
+    let args: Vec<String> = std::env::args().collect();
+    let filename = if args.len() != 2 {
+        "/home/paul/Downloads/remotesensing-1853970.pdf"
+    } else {
+        &args[1]
+    };
+
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new().build(&event_loop).unwrap();
 
     let mut state = State::new(&window).await;
+
+    let doc = mupdf::Document::open(filename).unwrap();
+
+    let mut page_count = 0;
+    let total_page_count = doc.page_count().unwrap();
+    let page = doc.load_page(page_count).unwrap();
+    let mat = mupdf::Matrix::new_scale(1., 1.);
+    let pixmap = page
+        .to_pixmap(&mat, &Colorspace::device_rgb(), 1., false)
+        .unwrap();
+    state.create_texture(&pixmap);
 
     event_loop.run(move |event, _, control_flow| match event {
         Event::WindowEvent {
@@ -144,6 +391,40 @@ async fn run() {
                             },
                         ..
                     } => *control_flow = ControlFlow::Exit,
+                    WindowEvent::KeyboardInput {
+                        input:
+                            KeyboardInput {
+                                state: ElementState::Pressed,
+                                virtual_keycode: Some(VirtualKeyCode::Left),
+                                ..
+                            },
+                        ..
+                    } => {
+                        page_count = (page_count - 1).max(0);
+
+                        let page = doc.load_page(page_count).unwrap();
+                        let pixmap = page
+                            .to_pixmap(&mat, &Colorspace::device_rgb(), 1., false)
+                            .unwrap();
+                        state.create_texture(&pixmap);
+                    }
+                    WindowEvent::KeyboardInput {
+                        input:
+                            KeyboardInput {
+                                state: ElementState::Pressed,
+                                virtual_keycode: Some(VirtualKeyCode::Right),
+                                ..
+                            },
+                        ..
+                    } => {
+                        page_count = (page_count + 1).min(total_page_count - 1);
+
+                        let page = doc.load_page(page_count).unwrap();
+                        let pixmap = page
+                            .to_pixmap(&mat, &Colorspace::device_rgb(), 1., false)
+                            .unwrap();
+                        state.create_texture(&pixmap);
+                    }
                     WindowEvent::Resized(physical_size) => {
                         state.resize(*physical_size);
                     }
@@ -155,7 +436,6 @@ async fn run() {
             }
         }
         Event::RedrawRequested(window_id) if window_id == window.id() => {
-            info!("redraw requested");
             state.update();
             match state.render() {
                 Ok(_) => {}
@@ -173,5 +453,43 @@ async fn run() {
 }
 
 fn main() {
+    // let ctx = mupdf::Context::default();
+
+    // to_ppm(&pixmap, "output.ppm").unwrap();
+    // let mut file = std::fs::File::create("output.png").unwrap();
+    // pixmap.write_to(&mut file, mupdf::ImageFormat::PNG).unwrap();
+
     pollster::block_on(run());
+}
+
+fn _to_ppm(pixmap: &mupdf::Pixmap, filepath: &str) -> Result<(), std::io::Error> {
+    let mut file = std::fs::File::create(filepath)?;
+    file.write(b"P3\n")?;
+    file.write_fmt(format_args!("{} {} 255\n", pixmap.width(), pixmap.height()))?;
+
+    let pixels = pixmap.samples();
+    let stride = pixmap.stride() as usize;
+
+    let mut y: usize = 0;
+    while y < pixmap.height() as usize {
+        let mut x: usize = 0;
+        let new_pos = y * stride;
+        let row_pixels = &pixels[new_pos..new_pos + stride];
+        while x < pixmap.n() as usize * pixmap.width() as usize {
+            if pixmap.n() == 4 && row_pixels[x + 3] == 0 {
+                file.write(b"255 255 255\n")?; // Hacky rendering of alpha values but hey
+            } else {
+                file.write_fmt(format_args!(
+                    "{} {} {}\n",
+                    row_pixels[x],
+                    row_pixels[x + 1],
+                    row_pixels[x + 2],
+                ))?;
+            }
+            x += pixmap.n() as usize;
+        }
+        y += 1;
+    }
+
+    Ok(())
 }
