@@ -36,6 +36,7 @@ struct QuadRenderer {
     texture_height: u32,
     quad_width: u32,
     quad_height: u32,
+    pub changed: bool,
 }
 
 impl QuadRenderer {
@@ -64,6 +65,7 @@ impl QuadRenderer {
             changed = true;
         }
 
+        self.changed = changed;
         return changed;
     }
 
@@ -366,10 +368,16 @@ impl State {
                 render_pass.set_bind_group(0, &bind_group, &[]);
             }
 
-            if let Some(renderer) = &self.renderer {
-                let vertices = renderer.get_vertices();
-                self.queue
-                    .write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+            if let Some(renderer) = self.renderer.as_mut() {
+                if renderer.changed {
+                    let vertices = renderer.get_vertices();
+                    self.queue.write_buffer(
+                        &self.vertex_buffer,
+                        0,
+                        bytemuck::cast_slice(&vertices),
+                    );
+                    renderer.changed = false;
+                }
             }
 
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
@@ -404,6 +412,7 @@ impl State {
                 texture_width: texture_size.width,
                 quad_width: winwidth,
                 quad_height: winheight,
+                changed: true,
             });
         }
 
