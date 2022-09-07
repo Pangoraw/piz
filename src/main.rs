@@ -350,9 +350,9 @@ impl State {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: self.color_r,
-                            g: 0.2,
-                            b: 0.2,
+                            r: 0.8 + 0.2 * self.color_r,
+                            g: 1.0,
+                            b: 1.0,
                             a: 1.0,
                         }),
                         store: true,
@@ -461,6 +461,7 @@ async fn run() {
     env_logger::init();
 
     let args: Vec<String> = std::env::args().collect();
+    let exe_name = &args[0];
     let filename = if args.len() != 2 {
         "/home/paul/Downloads/remotesensing-1853970.pdf"
     } else {
@@ -469,6 +470,7 @@ async fn run() {
 
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
+        .with_title(format!("{} - {}", filename, exe_name))
         .with_inner_size(winit::dpi::PhysicalSize::new(420, 180))
         .build(&event_loop)
         .unwrap();
@@ -480,7 +482,8 @@ async fn run() {
     let mut page_count = 0;
     let total_page_count = doc.page_count().unwrap();
     let page = doc.load_page(page_count).unwrap();
-    let mat = mupdf::Matrix::new_scale(2., 2.);
+    let scale = 7.0;
+    let mat = mupdf::Matrix::new_scale(scale, scale);
 
     let pixmap = page
         .to_pixmap(&mat, &Colorspace::device_rgb(), 1., false)
