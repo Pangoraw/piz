@@ -466,6 +466,28 @@ impl State {
     }
 }
 
+struct RenderedPage {
+    page: mupdf::Page,
+    pub pixmap: mupdf::Pixmap,
+}
+
+impl RenderedPage {
+    pub fn new(doc: &mupdf::Document, page_count: i32) -> Self {
+        let page = doc.load_page(page_count).unwrap();
+
+        let scale = 7.0;
+        let mat = mupdf::Matrix::new_scale(scale, scale);
+
+        let pixmap = page
+            .to_pixmap(&mat, &Colorspace::device_rgb(), 1., false)
+            .unwrap();
+        Self {
+            page,
+            pixmap,
+        }
+    }
+}
+
 async fn run() {
     env_logger::init();
 
@@ -489,16 +511,20 @@ async fn run() {
     let doc = mupdf::Document::open(filename).unwrap();
 
     let mut page_count = 0;
-    let total_page_count = doc.page_count().unwrap();
-    let page = doc.load_page(page_count).unwrap();
-    let scale = 7.0;
-    let mat = mupdf::Matrix::new_scale(scale, scale);
+    let total_page_count = doc.page_count().unwrap() as usize;
 
-    let pixmap = page
-        .to_pixmap(&mat, &Colorspace::device_rgb(), 1., false)
-        .unwrap();
+    let mut pages = vec![ RenderedPage::new(&doc, 0), RenderedPage::new(&doc, 1) ];
+    // let page = doc.load_page(page_count).unwrap();
+
+    // let scale = 7.0;
+    // let mat = mupdf::Matrix::new_scale(scale, scale);
+
+    // let pixmap = page
+    //     .to_pixmap(&mat, &Colorspace::device_rgb(), 1., false)
+    //     .unwrap();
     let winsize = window.inner_size();
-    state.create_texture(&pixmap, winsize.width, winsize.height);
+    let page = &pages[page_count];
+    state.create_texture(&page.pixmap, winsize.width, winsize.height);
 
     event_loop.run(move |event, _, control_flow| match event {
         Event::WindowEvent {
@@ -528,12 +554,9 @@ async fn run() {
                     } => {
                         page_count = (page_count - 1).max(0);
 
-                        let page = doc.load_page(page_count).unwrap();
-                        let pixmap = page
-                            .to_pixmap(&mat, &Colorspace::device_rgb(), 1., false)
-                            .unwrap();
+                        let page = &pages[page_count];
                         let winsize = window.inner_size();
-                        state.create_texture(&pixmap, winsize.width, winsize.height);
+                        state.create_texture(&page.pixmap, winsize.width, winsize.height);
                     }
                     WindowEvent::KeyboardInput {
                         input:
@@ -546,12 +569,13 @@ async fn run() {
                     } => {
                         page_count = (page_count + 1).min(total_page_count - 1);
 
-                        let page = doc.load_page(page_count).unwrap();
-                        let pixmap = page
-                            .to_pixmap(&mat, &Colorspace::device_rgb(), 1., false)
-                            .unwrap();
+                        if pages.len() == page_count {
+                            pages.push(RenderedPage::new(&doc, pages.len() as i32));
+                        }
+
+                        let page = &pages[page_count];
                         let winsize = window.inner_size();
-                        state.create_texture(&pixmap, winsize.width, winsize.height);
+                        state.create_texture(&page.pixmap, winsize.width, winsize.height);
                     }
                     WindowEvent::Resized(physical_size) => {
                         state.resize(*physical_size);
@@ -566,8 +590,8 @@ async fn run() {
         Event::RedrawRequested(window_id) if window_id == window.id() => {
             let winsize = window.inner_size();
             state.update(
-                pixmap.width(),
-                pixmap.height(),
+                pages[0].pixmap.width(),
+                pages[0].pixmap.height(),
                 winsize.width,
                 winsize.height,
             );
