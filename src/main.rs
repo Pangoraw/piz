@@ -24,7 +24,7 @@ impl Vertex {
 
     fn desc<'a>() -> wgpu::VertexBufferLayout<'a> {
         wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &Self::ATTRIBS,
         }
@@ -136,14 +136,77 @@ impl QuadRenderer {
 //                        A  C  B  A  D  C
 const INDICES: &[u16] = &[0, 2, 1, 0, 3, 2];
 
-struct BlockRenderPipeline {
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct QuadVertex {
+    position: [f32; 2],
+}
+
+unsafe impl bytemuck::Pod for QuadVertex {}
+unsafe impl bytemuck::Zeroable for QuadVertex {}
+
+impl QuadVertex {
+    const ATTRIBS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x2];
+
+    fn desc<'a>() -> wgpu::VertexBufferLayout<'a> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &Self::ATTRIBS,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Quad {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+impl Default for Quad {
+    fn default() -> Self {
+        Self {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        }
+    }
+}
+
+impl Quad {
+    pub fn get_vertices(&self) -> [QuadVertex; 4] {
+        fn texture_vertex_point(x: f32, y: f32) -> (f32, f32) {
+            let y = 1.0 - 2.0 * y;
+            let x = 2.0 * x - 1.0;
+            (x, y)
+        }
+
+        let (x0, y0) = texture_vertex_point(self.x, self.y);
+        let (x1, y1) = texture_vertex_point(self.x + self.width, self.y + self.height);
+
+        [
+            QuadVertex { position: [x0, y0] }, // A
+            QuadVertex { position: [x1, y0] }, // B
+            QuadVertex { position: [x1, y1] }, // C
+            QuadVertex { position: [x0, y1] }, // D
+        ]
+    }
+}
+
+struct BlocksRenderPipeline {
+    capacity: usize,
+
     render_pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
-    quad_renderer: QuadRenderer,
+
+    quads: Vec<Quad>,
 }
 
-impl BlockRenderPipeline {
+impl BlocksRenderPipeline {
     fn new(
         device: &wgpu::Device,
         n_blocks: usize,
@@ -161,8 +224,8 @@ impl BlockRenderPipeline {
             layout: Some(&render_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: "vs_main",
-                buffers: &[Vertex::desc()],
+                entry_point: "quad_vs_main",
+                buffers: &[QuadVertex::desc()],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -170,8 +233,8 @@ impl BlockRenderPipeline {
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
                     blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent::REPLACE,
-                        alpha: wgpu::BlendComponent::REPLACE,
+                        color: wgpu::BlendComponent::OVER,
+                        alpha: wgpu::BlendComponent::OVER,
                     }),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -196,74 +259,76 @@ impl BlockRenderPipeline {
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Block Render Vertex Buffer"),
             mapped_at_creation: false,
-            size: (n_blocks * 4 * std::mem::size_of::<Vertex>()) as u64,
+            size: (n_blocks * 4 * std::mem::size_of::<QuadVertex>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
         let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Block Index Buffer"),
             contents: bytemuck::cast_slice(INDICES),
-            usage: wgpu::BufferUsages::INDEX,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
         });
 
-        let quad_renderer = QuadRenderer {
-            texture_width: 1,
-            texture_height: 1,
-
-            quad_width: 100,
-            quad_height: 100,
-
-            changed: true,
-        };
+        let quads = vec![]; // Quad::default();
 
         Self {
+            capacity: n_blocks,
             render_pipeline,
             vertex_buffer,
             index_buffer,
-            quad_renderer,
+            quads,
         }
     }
 
     fn render<'a, 'b>(
         &'a mut self,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         render_pass: &'b mut wgpu::RenderPass<'a>,
     ) {
         render_pass.set_pipeline(&self.render_pipeline);
 
-        if self.quad_renderer.changed {
-            let quad_y =
-                self.quad_renderer.texture_height as f32 / self.quad_renderer.quad_height as f32;
-            let quad_y = 1.0 - 2.0 * (quad_y);
+        // TODO: Move this to an instance buffer
+        let vertices: Vec<QuadVertex> = self
+            .quads
+            .iter()
+            .map(|q| q.get_vertices())
+            .flatten()
+            .collect();
+        let indices: Vec<u16> = (0..self.quads.len())
+            .map(|i| 4 * i)
+            .map(|i| [i + 0, i + 2, i + 1, i + 0, i + 3, i + 2])
+            .take(self.quads.len())
+            .flatten()
+            .map(|x| x as u16)
+            .collect();
 
-            let quad_x =
-                self.quad_renderer.texture_width as f32 / self.quad_renderer.quad_width as f32;
-            let quad_x = 2.0 * quad_x - 1.0;
-
-            let vertices = [
-                Vertex {
-                    position: [-1.0, 1.0, 0.0],
-                    tex_coords: [0.0, 0.0],
-                }, // A
-                Vertex {
-                    position: [quad_x, 1.0, 0.0],
-                    tex_coords: [1.0, 0.0],
-                }, // B
-                Vertex {
-                    position: [quad_x, quad_y, 0.0],
-                    tex_coords: [1.0, 1.0],
-                }, // C
-                Vertex {
-                    position: [-1.0, quad_y, 0.0],
-                    tex_coords: [0.0, 1.0],
-                }, // D
-            ];
+        if self.capacity <= self.quads.len() {
+            self.vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Block Render Vertex Buffer"),
+                contents: bytemuck::cast_slice(&vertices),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            });
+            self.index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Block Render Vertex Buffer"),
+                contents: bytemuck::cast_slice(&indices),
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            });
+        } else {
             queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&vertices));
-            self.quad_renderer.changed = false;
+            queue.write_buffer(&self.index_buffer, 0, bytemuck::cast_slice(&indices));
         }
 
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-        render_pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+        render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
+    }
+
+    fn add_block(&mut self, quad: Quad) {
+        // if self.capacity == self.quads.len() {
+        // panic!("cannot add a new quad {} {}", self.capacity, self.quads.len());
+        // }
+
+        self.quads.push(quad);
     }
 }
 
@@ -308,7 +373,7 @@ struct State {
     size: winit::dpi::PhysicalSize<u32>,
 
     page_render_pipeline: PageRenderPipeline,
-    block_render_pipeline: BlockRenderPipeline,
+    block_render_pipeline: BlocksRenderPipeline,
 
     color_r: f64,
 }
@@ -448,7 +513,7 @@ impl State {
             },
         };
 
-        let block_render_pipeline = BlockRenderPipeline::new(&device, 1, &config, &shader);
+        let block_render_pipeline = BlocksRenderPipeline::new(&device, 1, &config, &shader);
 
         Self {
             surface,
@@ -490,12 +555,17 @@ impl State {
             winwidth,
             winheight,
         );
-        self.block_render_pipeline.quad_renderer.update(
-            (self.color_r * winwidth as f64) as u32,
-            20,
-            winwidth,
-            winheight,
-        );
+
+        // dbg!(winwidth, winheight);
+        // self.block_render_pipeline.quad.update(winwidth, winheight);
+
+        // self.block_render_pipeline
+        //     .quad
+        //     .resize((self.color_r * 20.0) as u32, (self.color_r * 30.0) as u32);
+
+        // self.block_render_pipeline
+        //     .quad
+        //     .set_position((self.color_r * 100.0) as u32, (self.color_r * 200.0) as u32);
     }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -532,11 +602,31 @@ impl State {
             self.page_render_pipeline
                 .render(&self.queue, &mut render_pass);
             self.block_render_pipeline
-                .render(&self.queue, &mut render_pass);
+                .render(&self.device, &self.queue, &mut render_pass);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
+
+        Ok(())
+    }
+
+    fn highlight_first_blocks(&mut self, page: &RenderedPage) -> Result<(), mupdf::Error> {
+        let page_bounds = page.page.bounds()?;
+
+        let blocks = page.textpage.blocks().skip(2);
+        for block in blocks {
+            for line in block.lines() {
+                let rect = line.bounds();
+
+                self.block_render_pipeline.add_block(Quad {
+                    x: rect.x0 / page_bounds.width(),
+                    y: rect.y0 / page_bounds.height(),
+                    width: (rect.x1 - rect.x0) / page_bounds.width(),
+                    height: (rect.y1 - rect.y0) / page_bounds.height(),
+                });
+            }
+        }
 
         Ok(())
     }
@@ -618,13 +708,16 @@ impl State {
 
 struct RenderedPage {
     page: mupdf::Page,
-    pub pixmap: mupdf::Pixmap,
+    pixmap: mupdf::Pixmap,
     textpage: mupdf::TextPage,
 }
 
 impl RenderedPage {
     pub fn new(doc: &mupdf::Document, page_count: i32) -> Result<Self, mupdf::Error> {
         let page = doc.load_page(page_count)?;
+
+        let bounds = page.bounds()?;
+        dbg!(bounds);
 
         let scale = 1.5;
         let mat = mupdf::Matrix::new_scale(scale, scale);
@@ -658,10 +751,10 @@ async fn run() {
     let mut ctx = mupdf::context::Context::get();
     ctx.set_text_aa_level(8);
 
-    let mut pages = vec![
-        RenderedPage::new(&doc, 0).unwrap(),
-        RenderedPage::new(&doc, 1).unwrap(),
-    ];
+    let mut pages = vec![RenderedPage::new(&doc, 0).unwrap()];
+    if page_count > 1 {
+        pages.push(RenderedPage::new(&doc, 0).unwrap());
+    }
     let page = &pages[page_count];
 
     let event_loop = EventLoop::new();
@@ -674,7 +767,11 @@ async fn run() {
         .build(&event_loop)
         .unwrap();
 
+    dbg!(page.pixmap.width());
+    dbg!(page.pixmap.height());
+
     let mut state = State::new(&window).await;
+    state.highlight_first_blocks(page).unwrap();
 
     // for block in page.textpage.blocks() {
     //     for line in block.lines() {

@@ -18,6 +18,23 @@ fn vs_main(
     return out;
 }
 
+struct QuadVertex {
+    @location(0) position: vec2<f32>,
+};
+
+struct QuadVertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+}
+
+@vertex
+fn quad_vs_main(
+    model: QuadVertex,
+) -> QuadVertexOutput {
+    var out: QuadVertexOutput;
+    out.clip_position = vec4(model.position, 1.0, 1.0);
+    return out;
+}
+
 // Fragment shader
 
 @group(0) @binding(0)
@@ -31,6 +48,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 
 @fragment
-fn quad_fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(1.0, 0.8, 0.2, 1.0);
+fn quad_fs_main(in: QuadVertexOutput) -> @location(0) vec4<f32> {
+    return vec4<f32>(1.0, 0.2, 0.2, 0.3);
 }
