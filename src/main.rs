@@ -70,6 +70,20 @@ impl QuadRenderer {
     }
 
     pub fn get_vertices(&self) -> [Vertex; 4] {
+        //
+        // position coordinates   texture coordinates
+        // frame                  frame
+        //
+        //  A       1       B     0 ------ -----> 1
+        //          ^             |
+        //          |             |
+        //          |             |
+        // -1 <---- 0 ----> 1     |
+        //          |             |
+        //          |             |
+        //          v             v
+        //  D      -1       C     1
+        //
         let texture_ratio = 0.5 * self.texture_width as f32 / self.texture_height as f32;
         let quad_ratio = self.quad_width as f32 / self.quad_height as f32;
 
@@ -117,39 +131,6 @@ impl QuadRenderer {
         }
     }
 }
-
-//
-// position coordinates   texture coordinates
-// frame                  frame
-//
-//  A       1       B     0 ------ -----> 1
-//          ^             |
-//          |             |
-//          |             |
-// -1 <---- 0 ----> 1     |
-//          |             |
-//          |             |
-//          v             v
-//  D      -1       C     1
-//
-const VERTICES: &[Vertex] = &[
-    Vertex {
-        position: [-1.0, 1.0, 0.0],
-        tex_coords: [0.0, 0.0],
-    }, // A
-    Vertex {
-        position: [1.0, 1.0, 0.0],
-        tex_coords: [1.0, 0.0],
-    }, // B
-    Vertex {
-        position: [1.0, -1.0, 0.0],
-        tex_coords: [1.0, 1.0],
-    }, // C
-    Vertex {
-        position: [-1.0, -1.0, 0.0],
-        tex_coords: [0.0, 1.0],
-    }, // D
-];
 
 //                        A  C  B  A  D  C
 const INDICES: &[u16] = &[0, 2, 1, 0, 3, 2];
@@ -277,9 +258,10 @@ impl State {
             },
             multiview: None,
         });
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Vertex Buffer"),
-            contents: bytemuck::cast_slice(VERTICES),
+            mapped_at_creation: false,
+            size: (4 * std::mem::size_of::<Vertex>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
         let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -469,22 +451,23 @@ impl State {
 struct RenderedPage {
     page: mupdf::Page,
     pub pixmap: mupdf::Pixmap,
+    textpage: mupdf::TextPage,
 }
 
 impl RenderedPage {
-    pub fn new(doc: &mupdf::Document, page_count: i32) -> Self {
-        let page = doc.load_page(page_count).unwrap();
+    pub fn new(doc: &mupdf::Document, page_count: i32) -> Result<Self, mupdf::Error> {
+        let page = doc.load_page(page_count)?;
 
-        let scale = 7.0;
+        let scale = 1.5;
         let mat = mupdf::Matrix::new_scale(scale, scale);
 
-        let pixmap = page
-            .to_pixmap(&mat, &Colorspace::device_rgb(), 1., false)
-            .unwrap();
-        Self {
+        let pixmap = page.to_pixmap(&mat, &Colorspace::device_rgb(), 1., false)?;
+        let textpage = page.to_text_page(mupdf::TextPageOptions::BLOCK_TEXT)?;
+        Ok(Self {
             page,
             pixmap,
-        }
+            textpage,
+        })
     }
 }
 
@@ -499,21 +482,39 @@ async fn run() {
         &args[1]
     };
 
-    let event_loop = EventLoop::new();
-    let window = WindowBuilder::new()
-        .with_title(format!("{} - {}", filename, exe_name))
-        .with_inner_size(winit::dpi::PhysicalSize::new(420, 180))
-        .build(&event_loop)
-        .unwrap();
-
-    let mut state = State::new(&window).await;
-
     let doc = mupdf::Document::open(filename).unwrap();
 
     let mut page_count = 0;
     let total_page_count = doc.page_count().unwrap() as usize;
 
-    let mut pages = vec![ RenderedPage::new(&doc, 0), RenderedPage::new(&doc, 1) ];
+    let mut pages = vec![
+        RenderedPage::new(&doc, 0).unwrap(),
+        RenderedPage::new(&doc, 1).unwrap(),
+    ];
+    let page = &pages[page_count];
+
+    let event_loop = EventLoop::new();
+    let window = WindowBuilder::new()
+        .with_title(format!("{} - {}", filename, exe_name))
+        .with_inner_size(winit::dpi::PhysicalSize::new(
+            page.pixmap.width(),
+            page.pixmap.height(),
+        ))
+        .build(&event_loop)
+        .unwrap();
+
+    let mut state = State::new(&window).await;
+
+    for block in page.textpage.blocks() {
+        for line in block.lines() {
+            println!("Rect = {:?}", line.bounds());
+            for char in line.chars() {
+                print!("{}", char.char().unwrap());
+            }
+            println!("");
+        }
+    }
+
     // let page = doc.load_page(page_count).unwrap();
 
     // let scale = 7.0;
@@ -523,7 +524,6 @@ async fn run() {
     //     .to_pixmap(&mat, &Colorspace::device_rgb(), 1., false)
     //     .unwrap();
     let winsize = window.inner_size();
-    let page = &pages[page_count];
     state.create_texture(&page.pixmap, winsize.width, winsize.height);
 
     event_loop.run(move |event, _, control_flow| match event {
@@ -551,7 +551,7 @@ async fn run() {
                                 ..
                             },
                         ..
-                    } => {
+                    } if page_count > 0 => {
                         page_count = (page_count - 1).max(0);
 
                         let page = &pages[page_count];
@@ -570,7 +570,7 @@ async fn run() {
                         page_count = (page_count + 1).min(total_page_count - 1);
 
                         if pages.len() == page_count {
-                            pages.push(RenderedPage::new(&doc, pages.len() as i32));
+                            pages.push(RenderedPage::new(&doc, pages.len() as i32).unwrap());
                         }
 
                         let page = &pages[page_count];
@@ -635,7 +635,9 @@ fn _to_ppm(pixmap: &mupdf::Pixmap, filepath: &str) -> Result<(), std::io::Error>
         let row_pixels = &pixels[new_pos..new_pos + stride];
         while x < pixmap.n() as usize * pixmap.width() as usize {
             if pixmap.n() == 4 && row_pixels[x + 3] == 0 {
-                file.write(b"255 255 255\n")?; // Hacky rendering of alpha values but hey
+                // TODO: Use the real formula.
+                // Hacky rendering of alpha values but hey
+                file.write(b"255 255 255\n")?;
             } else {
                 file.write_fmt(format_args!(
                     "{} {} {}\n",
