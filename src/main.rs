@@ -135,21 +135,81 @@ impl QuadRenderer {
 //                        A  C  B  A  D  C
 const INDICES: &[u16] = &[0, 2, 1, 0, 3, 2];
 
+//struct BlockRenderPipeline {
+//    render_pipeline: wgpu::RenderPipeline,
+//    vertex_buffer: wgpu::Buffer,
+//    index_buffer: wgpu::Buffer,
+//}
+
+struct PageRenderPipeline {
+    texture: Option<wgpu::Texture>,
+    render_pipeline: wgpu::RenderPipeline,
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+
+    bind_group_layout: wgpu::BindGroupLayout,
+    bind_group: Option<wgpu::BindGroup>,
+
+    renderer: QuadRenderer,
+}
+
+impl PageRenderPipeline {
+    pub fn render(
+        &mut self,
+        queue: &wgpu::Queue,
+        mut encoder: wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+    ) -> Option<wgpu::CommandBuffer> {
+        if let None = self.texture {
+            return None;
+        }
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Render Path"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.8,
+                            g: 1.0,
+                            b: 1.0,
+                            a: 1.0,
+                        }),
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: None,
+            });
+
+            render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_bind_group(0, &self.bind_group.as_ref().unwrap(), &[]);
+
+            if self.renderer.changed {
+                let vertices = self.renderer.get_vertices();
+                queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+                self.renderer.changed = false;
+            }
+
+            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            render_pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+        }
+
+        Some(encoder.finish())
+    }
+}
+
 struct State {
     surface: wgpu::Surface,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     size: winit::dpi::PhysicalSize<u32>,
-    render_pipeline: wgpu::RenderPipeline,
-    vertex_buffer: wgpu::Buffer,
-    index_buffer: wgpu::Buffer,
-    num_indices: u32,
 
-    bind_group_layout: wgpu::BindGroupLayout,
-    bind_group: Option<wgpu::BindGroup>,
-    texture: Option<wgpu::Texture>,
-    renderer: Option<QuadRenderer>,
+    page_render_pipeline: PageRenderPipeline,
+    // block_render_pipeline: BlockRenderPipeline,
 
     color_r: f64,
 }
@@ -269,7 +329,25 @@ impl State {
             contents: bytemuck::cast_slice(INDICES),
             usage: wgpu::BufferUsages::INDEX,
         });
-        let num_indices = INDICES.len() as u32;
+
+        let winsize = window.inner_size();
+        let page_render_pipeline = PageRenderPipeline {
+            texture: None,
+            render_pipeline,
+            vertex_buffer,
+            index_buffer,
+
+            bind_group_layout: texture_bind_group_layout,
+            bind_group: None,
+
+            renderer: QuadRenderer {
+                texture_width: 0,
+                texture_height: 0,
+                quad_width: winsize.width,
+                quad_height: winsize.height,
+                changed: true,
+            },
+        };
 
         Self {
             surface,
@@ -277,14 +355,9 @@ impl State {
             queue,
             config,
             size,
-            render_pipeline,
-            vertex_buffer,
-            index_buffer,
-            num_indices,
-            bind_group: None,
-            bind_group_layout: texture_bind_group_layout,
-            texture: None,
-            renderer: None,
+
+            page_render_pipeline,
+
             color_r: 0.3,
         }
     }
@@ -309,9 +382,12 @@ impl State {
     }
 
     fn update(&mut self, texture_height: u32, texture_width: u32, winwidth: u32, winheight: u32) {
-        if let Some(renderer) = self.renderer.as_mut() {
-            renderer.update(texture_width, texture_height, winwidth, winheight);
-        }
+        self.page_render_pipeline.renderer.update(
+            texture_width,
+            texture_height,
+            winwidth,
+            winheight,
+        );
     }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -320,54 +396,17 @@ impl State {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let mut encoder = self
+        let encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Render Encoder"),
             });
 
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Render Path"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.8 + 0.2 * self.color_r,
-                            g: 1.0,
-                            b: 1.0,
-                            a: 1.0,
-                        }),
-                        store: true,
-                    },
-                })],
-                depth_stencil_attachment: None,
-            });
+        let cmd = self
+            .page_render_pipeline
+            .render(&self.queue, encoder, &view);
 
-            render_pass.set_pipeline(&self.render_pipeline);
-            if let Some(bind_group) = &self.bind_group {
-                render_pass.set_bind_group(0, &bind_group, &[]);
-            }
-
-            if let Some(renderer) = self.renderer.as_mut() {
-                if renderer.changed {
-                    let vertices = renderer.get_vertices();
-                    self.queue.write_buffer(
-                        &self.vertex_buffer,
-                        0,
-                        bytemuck::cast_slice(&vertices),
-                    );
-                    renderer.changed = false;
-                }
-            }
-
-            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
-        }
-
-        self.queue.submit(std::iter::once(encoder.finish()));
+        self.queue.submit(cmd);
         output.present();
 
         Ok(())
@@ -379,26 +418,26 @@ impl State {
             height: pixmap.height(),
             depth_or_array_layers: 1,
         };
-        if let None = &self.texture {
-            self.texture = Some(self.device.create_texture(&wgpu::TextureDescriptor {
-                size: texture_size,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                label: Some("Pixmap Texture"),
-            }));
-            self.renderer = Some(QuadRenderer {
-                texture_height: texture_size.height,
-                texture_width: texture_size.width,
-                quad_width: winwidth,
-                quad_height: winheight,
-                changed: true,
-            });
+        if let None = &self.page_render_pipeline.texture {
+            self.page_render_pipeline.texture =
+                Some(self.device.create_texture(&wgpu::TextureDescriptor {
+                    size: texture_size,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    label: Some("Pixmap Texture"),
+                }));
+            self.page_render_pipeline.renderer.update(
+                pixmap.width(),
+                pixmap.height(),
+                winwidth,
+                winheight,
+            );
         }
 
-        let diffuse_texture = self.texture.as_ref().unwrap();
+        let diffuse_texture = self.page_render_pipeline.texture.as_ref().unwrap();
         self.queue.write_texture(
             wgpu::ImageCopyTexture {
                 texture: diffuse_texture,
@@ -415,7 +454,7 @@ impl State {
             texture_size,
         );
 
-        if let None = self.bind_group {
+        if let None = self.page_render_pipeline.bind_group {
             let diffuse_texture_view =
                 diffuse_texture.create_view(&wgpu::TextureViewDescriptor::default());
             let diffuse_sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
@@ -429,7 +468,7 @@ impl State {
             });
 
             let diffuse_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                layout: &self.bind_group_layout,
+                layout: &self.page_render_pipeline.bind_group_layout,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
@@ -443,7 +482,7 @@ impl State {
                 label: Some("Pixmap Texture Bind Group"),
             });
 
-            self.bind_group = Some(diffuse_bind_group);
+            self.page_render_pipeline.bind_group = Some(diffuse_bind_group);
         }
     }
 }
