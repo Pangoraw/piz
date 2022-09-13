@@ -380,6 +380,9 @@ struct State {
     block_render_pipeline: BlocksRenderPipeline,
     line_render_pipeline: BlocksRenderPipeline,
 
+    render_blocks: bool,
+    render_lines: bool,
+
     color_r: f64,
 }
 
@@ -532,6 +535,9 @@ impl State {
             block_render_pipeline,
             line_render_pipeline,
 
+            render_blocks: false,
+            render_lines: false,
+
             color_r: 0.3,
         }
     }
@@ -607,10 +613,14 @@ impl State {
 
             self.page_render_pipeline
                 .render(&self.queue, &mut render_pass);
-            self.block_render_pipeline
-                .render(&self.device, &self.queue, &mut render_pass);
-            self.line_render_pipeline
-                .render(&self.device, &self.queue, &mut render_pass);
+            if self.render_blocks {
+                self.block_render_pipeline
+                    .render(&self.device, &self.queue, &mut render_pass);
+            }
+            if self.render_lines {
+                self.line_render_pipeline
+                    .render(&self.device, &self.queue, &mut render_pass);
+            }
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -734,9 +744,7 @@ impl RenderedPage {
     pub fn new(doc: &mupdf::Document, page_count: i32) -> Result<Self, mupdf::Error> {
         let page = doc.load_page(page_count)?;
 
-        let bounds = page.bounds()?;
-
-        let scale = 1.5;
+        let scale = 1.;
         let mat = mupdf::Matrix::new_scale(scale, scale);
 
         let pixmap = page.to_pixmap(&mat, &Colorspace::device_rgb(), 1., false)?;
@@ -829,38 +837,39 @@ async fn run() {
                         input:
                             KeyboardInput {
                                 state: ElementState::Pressed,
-                                virtual_keycode: Some(VirtualKeyCode::Left),
+                                virtual_keycode: Some(keycode),
                                 ..
                             },
                         ..
-                    } if page_count > 0 => {
-                        page_count = (page_count - 1).max(0);
+                    } => match keycode {
+                        VirtualKeyCode::Left if page_count > 0 => {
+                            page_count = (page_count - 1).max(0);
 
-                        let page = &pages[page_count];
-                        let winsize = window.inner_size();
-                        state.highlight_first_blocks(page).unwrap();
-                        state.create_texture(&page.pixmap, winsize.width, winsize.height);
-                    }
-                    WindowEvent::KeyboardInput {
-                        input:
-                            KeyboardInput {
-                                state: ElementState::Pressed,
-                                virtual_keycode: Some(VirtualKeyCode::Right),
-                                ..
-                            },
-                        ..
-                    } => {
-                        page_count = (page_count + 1).min(total_page_count - 1);
-
-                        if pages.len() == page_count {
-                            pages.push(RenderedPage::new(&doc, pages.len() as i32).unwrap());
+                            let page = &pages[page_count];
+                            let winsize = window.inner_size();
+                            state.highlight_first_blocks(page).unwrap();
+                            state.create_texture(&page.pixmap, winsize.width, winsize.height);
                         }
+                        VirtualKeyCode::Right => {
+                            page_count = (page_count + 1).min(total_page_count - 1);
 
-                        let page = &pages[page_count];
-                        let winsize = window.inner_size();
-                        state.highlight_first_blocks(page).unwrap();
-                        state.create_texture(&page.pixmap, winsize.width, winsize.height);
-                    }
+                            if pages.len() == page_count {
+                                pages.push(RenderedPage::new(&doc, pages.len() as i32).unwrap());
+                            }
+
+                            let page = &pages[page_count];
+                            let winsize = window.inner_size();
+                            state.highlight_first_blocks(page).unwrap();
+                            state.create_texture(&page.pixmap, winsize.width, winsize.height);
+                        }
+                        VirtualKeyCode::B => {
+                            state.render_blocks = !state.render_blocks;
+                        }
+                        VirtualKeyCode::L => {
+                            state.render_lines = !state.render_lines;
+                        }
+                        _ => {}
+                    },
                     WindowEvent::Resized(physical_size) => {
                         state.resize(*physical_size);
                     }
