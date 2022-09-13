@@ -268,7 +268,7 @@ impl BlocksRenderPipeline {
             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
         });
 
-        let quads = vec![]; // Quad::default();
+        let quads = Vec::with_capacity(n_blocks);
 
         Self {
             capacity: n_blocks,
@@ -323,6 +323,10 @@ impl BlocksRenderPipeline {
         render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
     }
 
+    fn clear_blocks(&mut self) {
+        self.quads.clear();
+    }
+
     fn add_block(&mut self, quad: Quad) {
         // if self.capacity == self.quads.len() {
         // panic!("cannot add a new quad {} {}", self.capacity, self.quads.len());
@@ -374,6 +378,7 @@ struct State {
 
     page_render_pipeline: PageRenderPipeline,
     block_render_pipeline: BlocksRenderPipeline,
+    line_render_pipeline: BlocksRenderPipeline,
 
     color_r: f64,
 }
@@ -513,7 +518,8 @@ impl State {
             },
         };
 
-        let block_render_pipeline = BlocksRenderPipeline::new(&device, 1, &config, &shader);
+        let block_render_pipeline = BlocksRenderPipeline::new(&device, 10, &config, &shader);
+        let line_render_pipeline = BlocksRenderPipeline::new(&device, 10, &config, &shader);
 
         Self {
             surface,
@@ -524,6 +530,7 @@ impl State {
 
             page_render_pipeline,
             block_render_pipeline,
+            line_render_pipeline,
 
             color_r: 0.3,
         }
@@ -556,7 +563,6 @@ impl State {
             winheight,
         );
 
-        // dbg!(winwidth, winheight);
         // self.block_render_pipeline.quad.update(winwidth, winheight);
 
         // self.block_render_pipeline
@@ -603,6 +609,8 @@ impl State {
                 .render(&self.queue, &mut render_pass);
             self.block_render_pipeline
                 .render(&self.device, &self.queue, &mut render_pass);
+            self.line_render_pipeline
+                .render(&self.device, &self.queue, &mut render_pass);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -612,20 +620,30 @@ impl State {
     }
 
     fn highlight_first_blocks(&mut self, page: &RenderedPage) -> Result<(), mupdf::Error> {
+        self.block_render_pipeline.clear_blocks();
+        self.line_render_pipeline.clear_blocks();
+
         let page_bounds = page.page.bounds()?;
 
-        let blocks = page.textpage.blocks().skip(2);
+        let blocks = page.textpage.blocks();
         for block in blocks {
             for line in block.lines() {
                 let rect = line.bounds();
 
-                self.block_render_pipeline.add_block(Quad {
+                self.line_render_pipeline.add_block(Quad {
                     x: rect.x0 / page_bounds.width(),
                     y: rect.y0 / page_bounds.height(),
                     width: (rect.x1 - rect.x0) / page_bounds.width(),
                     height: (rect.y1 - rect.y0) / page_bounds.height(),
                 });
             }
+            let rect = block.bounds();
+            self.block_render_pipeline.add_block(Quad {
+                x: rect.x0 / page_bounds.width(),
+                y: rect.y0 / page_bounds.height(),
+                width: (rect.x1 - rect.x0) / page_bounds.width(),
+                height: (rect.y1 - rect.y0) / page_bounds.height(),
+            });
         }
 
         Ok(())
@@ -717,7 +735,6 @@ impl RenderedPage {
         let page = doc.load_page(page_count)?;
 
         let bounds = page.bounds()?;
-        dbg!(bounds);
 
         let scale = 1.5;
         let mat = mupdf::Matrix::new_scale(scale, scale);
@@ -766,9 +783,6 @@ async fn run() {
         ))
         .build(&event_loop)
         .unwrap();
-
-    dbg!(page.pixmap.width());
-    dbg!(page.pixmap.height());
 
     let mut state = State::new(&window).await;
     state.highlight_first_blocks(page).unwrap();
@@ -824,6 +838,7 @@ async fn run() {
 
                         let page = &pages[page_count];
                         let winsize = window.inner_size();
+                        state.highlight_first_blocks(page).unwrap();
                         state.create_texture(&page.pixmap, winsize.width, winsize.height);
                     }
                     WindowEvent::KeyboardInput {
@@ -843,6 +858,7 @@ async fn run() {
 
                         let page = &pages[page_count];
                         let winsize = window.inner_size();
+                        state.highlight_first_blocks(page).unwrap();
                         state.create_texture(&page.pixmap, winsize.width, winsize.height);
                     }
                     WindowEvent::Resized(physical_size) => {
