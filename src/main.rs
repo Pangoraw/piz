@@ -670,6 +670,8 @@ impl State {
     fn hovers_line(&self, pos: winit::dpi::PhysicalPosition<f64>) -> bool {
         let quads = &self.line_render_pipeline.quads;
 
+        let tw = self.page_render_pipeline.renderer.texture_width;
+        let th = self.page_render_pipeline.renderer.texture_height;
         let qw = self.page_render_pipeline.renderer.quad_width;
         let qh = self.page_render_pipeline.renderer.quad_height;
 
@@ -677,7 +679,12 @@ impl State {
         let x = pos.x as f32 / qw as f32;
         let y = pos.y as f32 / qh as f32;
 
-        // TODO: move to texture space
+        let tr = th as f32 / tw as f32;
+        let qr = qh as f32 / qw as f32;
+        let v_scale = qr / tr;
+
+        // Texture space
+        let y = y * v_scale;
 
         for quad in quads {
             if quad.x < x && x < quad.x + quad.width && quad.y < y && y < quad.y + quad.height {
