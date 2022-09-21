@@ -544,7 +544,7 @@ impl State {
         match event {
             WindowEvent::CursorMoved { position, .. } => {
                 self.color_r = position.y as f64 / self.size.height as f64;
-                true
+                false
             }
             _ => false,
         }
@@ -667,6 +667,27 @@ impl State {
         Ok(())
     }
 
+    fn hovers_line(&self, pos: winit::dpi::PhysicalPosition<f64>) -> bool {
+        let quads = &self.line_render_pipeline.quads;
+
+        let qw = self.page_render_pipeline.renderer.quad_width;
+        let qh = self.page_render_pipeline.renderer.quad_height;
+
+        // Screen space
+        let x = pos.x as f32 / qw as f32;
+        let y = pos.y as f32 / qh as f32;
+
+        // TODO: move to texture space
+
+        for quad in quads {
+            if quad.x < x && x < quad.x + quad.width && quad.y < y && y < quad.y + quad.height {
+                return true;
+            }
+        }
+
+        false
+    }
+
     fn create_texture(&mut self, pixmap: &mupdf::Pixmap, winwidth: u32, winheight: u32) {
         let texture_size = wgpu::Extent3d {
             width: pixmap.width(),
@@ -752,7 +773,7 @@ impl RenderedPage {
     pub fn new(doc: &mupdf::Document, page_count: i32) -> Result<Self, mupdf::Error> {
         let page = doc.load_page(page_count)?;
 
-        let scale = 2.;
+        let scale = 1.;
         let mat = mupdf::Matrix::new_scale(scale, scale);
 
         let pixmap = page.to_pixmap(&mat, &Colorspace::device_rgb(), 1., false)?;
@@ -832,6 +853,13 @@ async fn run() {
         } if window_id == window.id() => {
             if !state.input(event) {
                 match event {
+                    WindowEvent::CursorMoved { position, .. } => {
+                        if state.hovers_line(*position) {
+                            window.set_cursor_icon(winit::window::CursorIcon::Text);
+                        } else {
+                            window.set_cursor_icon(winit::window::CursorIcon::Default);
+                        }
+                    }
                     WindowEvent::CloseRequested
                     | WindowEvent::KeyboardInput {
                         input:
