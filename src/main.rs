@@ -1,6 +1,5 @@
 use std::io::Write;
 
-use mupdf::Colorspace;
 use wgpu::{include_wgsl, util::DeviceExt};
 use winit::{
     event::*,
@@ -317,11 +316,110 @@ impl BlocksRenderPipeline {
     }
 
     fn add_block(&mut self, quad: Quad) {
-        // if self.capacity == self.quads.len() {
-        // panic!("cannot add a new quad {} {}", self.capacity, self.quads.len());
-        // }
-
         self.quads.push(quad);
+    }
+}
+
+struct Point {
+    x: f32,
+    y: f32,
+}
+
+impl Point {
+    fn contained_in(&self, quad: mupdf::Quad) -> bool {
+        quad.ul.x < self.x && quad.ul.y < self.y && quad.lr.x > self.x && quad.lr.y > self.y
+    }
+}
+
+struct TextHighlighter {
+    text_page: mupdf::TextPage,
+    block_render_pipeline: BlocksRenderPipeline,
+    anchor: Option<Point>,
+    head: Option<Point>,
+}
+
+impl TextHighlighter {
+    fn new(page: mupdf::TextPage, block_render_pipeline: BlocksRenderPipeline) -> Self {
+        Self {
+            text_page: page,
+            block_render_pipeline,
+            anchor: None,
+            head: None,
+        }
+    }
+
+    fn start_selection(&mut self, pos: winit::dpi::PhysicalPosition<f64>) {
+        // TODO: transform this to page space
+        self.anchor = Some(Point {
+            x: pos.x as f32,
+            y: pos.y as f32,
+        });
+        self.head = None;
+    }
+
+    fn move_cursor(&mut self, cursor: winit::dpi::PhysicalPosition<f64>) {
+        if let None = self.anchor {
+            return;
+        }
+
+        self.head = Some(Point {
+            x: cursor.x as f32,
+            y: cursor.y as f32,
+        });
+    }
+
+    fn compute_quads(&mut self) {
+        self.block_render_pipeline.clear_blocks();
+
+        enum SelectState {
+            SeekStart,
+            SeekEnd,
+        }
+        let mut state = SelectState::SeekStart;
+
+        match (self.head.as_ref(), self.anchor.as_ref()) {
+            (Some(head), Some(anchor)) => {
+                for block in self.text_page.blocks() {
+                    for line in block.lines() {
+                        let bounds = line.bounds();
+                        let line_start = bounds.origin();
+                        let x = line_start.x;
+                        let y = line_start.y;
+
+                        for char in line.chars() {
+                            let endpoint =
+                                head.contained_in(char.quad()) && anchor.contained_in(char.quad());
+                            if let SelectState::SeekStart = state && endpoint {
+                                state = SelectState::SeekEnd
+                            } else if let SelectState::SeekEnd = state && endpoint {
+
+                            }
+                        }
+                        self.block_render_pipeline.add_block(Quad {
+                            x,
+                            y,
+                            width: 0.05,
+                            height: 0.05,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        };
+    }
+
+    fn render<'a, 'b>(
+        &'a mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        render_pass: &'b mut wgpu::RenderPass<'a>,
+        tw: u32,
+        th: u32,
+        qw: u32,
+        qh: u32,
+    ) {
+        self.block_render_pipeline
+            .render(device, queue, render_pass, tw, th, qw, qh);
     }
 }
 
@@ -695,13 +793,19 @@ impl State {
         false
     }
 
-    fn create_texture(&mut self, pixmap: &mupdf::Pixmap, winwidth: u32, winheight: u32) {
+    fn create_texture(
+        &mut self,
+        pixmap: &mupdf::Pixmap,
+        winwidth: u32,
+        winheight: u32,
+        force: bool,
+    ) {
         let texture_size = wgpu::Extent3d {
             width: pixmap.width(),
             height: pixmap.height(),
             depth_or_array_layers: 1,
         };
-        if let None = &self.page_render_pipeline.texture {
+        if self.page_render_pipeline.texture.is_none() || force {
             self.page_render_pipeline.texture =
                 Some(self.device.create_texture(&wgpu::TextureDescriptor {
                     size: texture_size,
@@ -737,7 +841,7 @@ impl State {
             texture_size,
         );
 
-        if let None = self.page_render_pipeline.bind_group {
+        if self.page_render_pipeline.bind_group.is_none() || force {
             let diffuse_texture_view =
                 diffuse_texture.create_view(&wgpu::TextureViewDescriptor::default());
             let diffuse_sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
@@ -780,16 +884,22 @@ impl RenderedPage {
     pub fn new(doc: &mupdf::Document, page_count: i32) -> Result<Self, mupdf::Error> {
         let page = doc.load_page(page_count)?;
 
-        let scale = 1.;
-        let mat = mupdf::Matrix::new_scale(scale, scale);
-
-        let pixmap = page.to_pixmap(&mat, &Colorspace::device_rgb(), 1., false)?;
+        let mat = mupdf::Matrix::new_scale(1., 1.);
+        let pixmap = page.to_pixmap(&mat, &mupdf::Colorspace::device_rgb(), 1., false)?;
         let textpage = page.to_text_page(mupdf::TextPageOptions::BLOCK_TEXT)?;
         Ok(Self {
             page,
             pixmap,
             textpage,
         })
+    }
+
+    fn rerender(&mut self, scale_factor: f32) -> Result<(), mupdf::Error> {
+        let mat = mupdf::Matrix::new_scale(scale_factor, scale_factor);
+        self.pixmap = self
+            .page
+            .to_pixmap(&mat, &mupdf::Colorspace::device_rgb(), 1., false)?;
+        Ok(())
     }
 }
 
@@ -814,16 +924,19 @@ async fn run() {
 
     let mut pages = vec![RenderedPage::new(&doc, 0).unwrap()];
     if page_count > 1 {
-        pages.push(RenderedPage::new(&doc, 0).unwrap());
+        pages.push(RenderedPage::new(&doc, 1).unwrap());
     }
-    let page = &pages[page_count];
+    let page = &mut pages[page_count];
+    let bounds = page.page.bounds().unwrap();
+
+    dbg!(bounds);
 
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
         .with_title(format!("{} - {}", filename, exe_name))
-        .with_inner_size(winit::dpi::PhysicalSize::new(
-            page.pixmap.width(),
-            page.pixmap.height(),
+        .with_inner_size(winit::dpi::LogicalSize::new(
+            bounds.width(),
+            bounds.height(),
         ))
         .build(&event_loop)
         .unwrap();
@@ -831,8 +944,11 @@ async fn run() {
     let mut state = State::new(&window).await;
     state.highlight_first_blocks(page).unwrap();
 
+    let scale_factor = window.scale_factor();
+    page.rerender(scale_factor as f32).unwrap();
+
     let winsize = window.inner_size();
-    state.create_texture(&page.pixmap, winsize.width, winsize.height);
+    state.create_texture(&page.pixmap, winsize.width, winsize.height, false);
 
     // for block in page.textpage.blocks() {
     //     for line in block.lines() {
@@ -898,7 +1014,7 @@ async fn run() {
                             let page = &pages[page_count];
                             let winsize = window.inner_size();
                             state.highlight_first_blocks(page).unwrap();
-                            state.create_texture(&page.pixmap, winsize.width, winsize.height);
+                            state.create_texture(&page.pixmap, winsize.width, winsize.height, false);
                         }
                         VirtualKeyCode::Right => {
                             page_count = (page_count + 1).min(total_page_count - 1);
@@ -910,7 +1026,7 @@ async fn run() {
                             let page = &pages[page_count];
                             let winsize = window.inner_size();
                             state.highlight_first_blocks(page).unwrap();
-                            state.create_texture(&page.pixmap, winsize.width, winsize.height);
+                            state.create_texture(&page.pixmap, winsize.width, winsize.height, false);
                         }
                         VirtualKeyCode::B => {
                             state.render_blocks = !state.render_blocks;
@@ -932,6 +1048,13 @@ async fn run() {
         }
         Event::RedrawRequested(window_id) if window_id == window.id() => {
             let winsize = window.inner_size();
+            if (winsize.width).abs_diff(pages[page_count].pixmap.width()) > 2 {
+                let page_width = pages[page_count].page.bounds().unwrap().width();
+                let new_scale_factor = winsize.width as f32 / page_width;
+                pages[page_count].rerender(new_scale_factor as f32).unwrap();
+                state.create_texture(&pages[page_count].pixmap, winsize.width, winsize.height, true);
+            }
+
             state.update(
                 pages[page_count].pixmap.width(),
                 pages[page_count].pixmap.height(),
