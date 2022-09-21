@@ -837,7 +837,13 @@ async fn run() {
                         input:
                             KeyboardInput {
                                 state: ElementState::Pressed,
-                                virtual_keycode: Some(keycode),
+                                virtual_keycode:
+                                    Some(
+                                        keycode @ (VirtualKeyCode::Left
+                                        | VirtualKeyCode::Right
+                                        | VirtualKeyCode::B
+                                        | VirtualKeyCode::A),
+                                    ),
                                 ..
                             },
                         ..
@@ -868,7 +874,7 @@ async fn run() {
                         VirtualKeyCode::L => {
                             state.render_lines = !state.render_lines;
                         }
-                        _ => {}
+                        _ => unreachable!(),
                     },
                     WindowEvent::Resized(physical_size) => {
                         state.resize(*physical_size);
