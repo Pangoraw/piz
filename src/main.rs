@@ -31,6 +31,7 @@ impl Vertex {
     }
 }
 
+#[derive(Debug)]
 struct QuadRenderer {
     texture_width: u32,
     texture_height: u32,
@@ -47,7 +48,7 @@ impl QuadRenderer {
         quad_width: u32,
         quad_height: u32,
     ) -> bool {
-        let mut changed = false;
+        let mut changed = self.changed;
         if texture_width != self.texture_width {
             self.texture_width = texture_width;
             changed = true;
@@ -84,52 +85,30 @@ impl QuadRenderer {
         //          v             v
         //  D      -1       C     1
         //
-        let texture_ratio = self.texture_width as f32 / self.texture_height as f32;
-        let quad_ratio = self.quad_width as f32 / self.quad_height as f32;
+        let texture_ratio = self.texture_height as f32 / self.texture_width as f32;
+        let quad_ratio = self.quad_height as f32 / self.quad_width as f32;
 
         let texture_crop = texture_ratio / quad_ratio;
+        let quad_y = 1.0 - 2.0 * texture_crop;
 
-        if texture_crop > 1. {
-            // TODO: Fix this algorithm
-            let quad_y = 1.0 - 4.0 * (1.0 / texture_crop);
-            return [
-                Vertex {
-                    position: [-1.0, 1.0, 0.0],
-                    tex_coords: [0.0, 0.0],
-                }, // A
-                Vertex {
-                    position: [1.0, 1.0, 0.0],
-                    tex_coords: [1.0, 0.0],
-                }, // B
-                Vertex {
-                    position: [1.0, quad_y, 0.0],
-                    tex_coords: [1.0, 1.0],
-                }, // C
-                Vertex {
-                    position: [-1.0, quad_y, 0.0],
-                    tex_coords: [0.0, 1.0],
-                }, // D
-            ];
-        } else {
-            return [
-                Vertex {
-                    position: [-1.0, 1.0, 0.0],
-                    tex_coords: [0.0, 0.0],
-                }, // A
-                Vertex {
-                    position: [1.0, 1.0, 0.0],
-                    tex_coords: [1.0, 0.0],
-                }, // B
-                Vertex {
-                    position: [1.0, -1.0, 0.0],
-                    tex_coords: [1.0, texture_crop],
-                }, // C
-                Vertex {
-                    position: [-1.0, -1.0, 0.0],
-                    tex_coords: [0.0, texture_crop],
-                }, // D
-            ];
-        }
+        return [
+            Vertex {
+                position: [-1.0, 1.0, 0.0],
+                tex_coords: [0.0, 0.0],
+            }, // A
+            Vertex {
+                position: [1.0, 1.0, 0.0],
+                tex_coords: [1.0, 0.0],
+            }, // B
+            Vertex {
+                position: [1.0, quad_y, 0.0],
+                tex_coords: [1.0, 1.0],
+            }, // C
+            Vertex {
+                position: [-1.0, quad_y, 0.0],
+                tex_coords: [0.0, 1.0],
+            }, // D
+        ];
     }
 }
 
@@ -177,15 +156,22 @@ impl Default for Quad {
 }
 
 impl Quad {
-    pub fn get_vertices(&self) -> [QuadVertex; 4] {
+    pub fn get_vertices(&self, tw: u32, th: u32, qw: u32, qh: u32) -> [QuadVertex; 4] {
         fn texture_vertex_point(x: f32, y: f32) -> (f32, f32) {
-            let y = 1.0 - 2.0 * y;
             let x = 2.0 * x - 1.0;
+            let y = 1.0 - 2.0 * y;
             (x, y)
         }
 
-        let (x0, y0) = texture_vertex_point(self.x, self.y);
-        let (x1, y1) = texture_vertex_point(self.x + self.width, self.y + self.height);
+        let tr = th as f32 / tw as f32;
+        let qr = qh as f32 / qw as f32;
+        let v_scale = tr / qr;
+
+        let y0 = self.y * v_scale;
+        let y1 = (self.y + self.height) * v_scale;
+
+        let (x0, y0) = texture_vertex_point(self.x, y0);
+        let (x1, y1) = texture_vertex_point(self.x + self.width, y1);
 
         [
             QuadVertex { position: [x0, y0] }, // A
@@ -284,6 +270,10 @@ impl BlocksRenderPipeline {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         render_pass: &'b mut wgpu::RenderPass<'a>,
+        tw: u32,
+        th: u32,
+        qw: u32,
+        qh: u32,
     ) {
         render_pass.set_pipeline(&self.render_pipeline);
 
@@ -291,7 +281,7 @@ impl BlocksRenderPipeline {
         let vertices: Vec<QuadVertex> = self
             .quads
             .iter()
-            .map(|q| q.get_vertices())
+            .map(|q| q.get_vertices(tw, th, qw, qh))
             .flatten()
             .collect();
         let indices: Vec<u16> = (0..self.quads.len())
@@ -561,7 +551,7 @@ impl State {
         }
     }
 
-    fn update(&mut self, texture_height: u32, texture_width: u32, winwidth: u32, winheight: u32) {
+    fn update(&mut self, texture_width: u32, texture_height: u32, winwidth: u32, winheight: u32) {
         self.page_render_pipeline.renderer.update(
             texture_width,
             texture_height,
@@ -611,15 +601,34 @@ impl State {
                 depth_stencil_attachment: None,
             });
 
+            let texture_width = self.page_render_pipeline.renderer.texture_width;
+            let texture_height = self.page_render_pipeline.renderer.texture_height;
+            let quad_width = self.page_render_pipeline.renderer.quad_width;
+            let quad_height = self.page_render_pipeline.renderer.quad_height;
+
             self.page_render_pipeline
                 .render(&self.queue, &mut render_pass);
             if self.render_blocks {
-                self.block_render_pipeline
-                    .render(&self.device, &self.queue, &mut render_pass);
+                self.block_render_pipeline.render(
+                    &self.device,
+                    &self.queue,
+                    &mut render_pass,
+                    texture_width,
+                    texture_height,
+                    quad_width,
+                    quad_height,
+                );
             }
             if self.render_lines {
-                self.line_render_pipeline
-                    .render(&self.device, &self.queue, &mut render_pass);
+                self.line_render_pipeline.render(
+                    &self.device,
+                    &self.queue,
+                    &mut render_pass,
+                    texture_width,
+                    texture_height,
+                    quad_width,
+                    quad_height,
+                );
             }
         }
 
@@ -795,6 +804,9 @@ async fn run() {
     let mut state = State::new(&window).await;
     state.highlight_first_blocks(page).unwrap();
 
+    let winsize = window.inner_size();
+    state.create_texture(&page.pixmap, winsize.width, winsize.height);
+
     // for block in page.textpage.blocks() {
     //     for line in block.lines() {
     //         println!("Rect = {:?}", line.bounds());
@@ -813,8 +825,6 @@ async fn run() {
     // let pixmap = page
     //     .to_pixmap(&mat, &Colorspace::device_rgb(), 1., false)
     //     .unwrap();
-    let winsize = window.inner_size();
-    state.create_texture(&page.pixmap, winsize.width, winsize.height);
 
     event_loop.run(move |event, _, control_flow| match event {
         Event::WindowEvent {
@@ -842,7 +852,7 @@ async fn run() {
                                         keycode @ (VirtualKeyCode::Left
                                         | VirtualKeyCode::Right
                                         | VirtualKeyCode::B
-                                        | VirtualKeyCode::A),
+                                        | VirtualKeyCode::L),
                                     ),
                                 ..
                             },
@@ -889,8 +899,8 @@ async fn run() {
         Event::RedrawRequested(window_id) if window_id == window.id() => {
             let winsize = window.inner_size();
             state.update(
-                pages[0].pixmap.width(),
-                pages[0].pixmap.height(),
+                pages[page_count].pixmap.width(),
+                pages[page_count].pixmap.height(),
                 winsize.width,
                 winsize.height,
             );
