@@ -1,11 +1,10 @@
-use std::io::Write;
-
-use wgpu::{include_wgsl, util::DeviceExt};
-use winit::{
+use egui_winit::winit;
+use egui_winit::winit::{
     event::*,
     event_loop::{ControlFlow, EventLoop},
     window::{Window, WindowBuilder},
 };
+use wgpu::{include_wgsl, util::DeviceExt};
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -667,7 +666,26 @@ impl State {
         //     .set_position((self.color_r * 100.0) as u32, (self.color_r * 200.0) as u32);
     }
 
-    fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+    fn render(
+        &mut self,
+        rp: &mut egui_wgpu::renderer::RenderPass,
+        primitives: Vec<egui::epaint::ClippedPrimitive>,
+        textures: egui::TexturesDelta,
+    ) -> Result<(), wgpu::SurfaceError> {
+        let quad_width = self.page_render_pipeline.renderer.quad_width;
+        let quad_height = self.page_render_pipeline.renderer.quad_height;
+
+        let descriptor = egui_wgpu::renderer::ScreenDescriptor {
+            size_in_pixels: [quad_width, quad_height],
+            pixels_per_point: 1.0,
+        };
+
+        for (id, image_delta) in textures.set {
+            rp.update_texture(&self.device, &self.queue, id, &image_delta);
+            assert!(rp.texture(&id).is_some());
+        }
+        rp.update_buffers(&self.device, &self.queue, &primitives, &descriptor);
+
         let output = self.surface.get_current_texture()?;
         let view = output
             .texture
@@ -690,7 +708,7 @@ impl State {
                             r: 0.8,
                             g: 1.0,
                             b: 1.0,
-                            a: 1.0,
+                            a: 0.0,
                         }),
                         store: true,
                     },
@@ -700,8 +718,6 @@ impl State {
 
             let texture_width = self.page_render_pipeline.renderer.texture_width;
             let texture_height = self.page_render_pipeline.renderer.texture_height;
-            let quad_width = self.page_render_pipeline.renderer.quad_width;
-            let quad_height = self.page_render_pipeline.renderer.quad_height;
 
             self.page_render_pipeline
                 .render(&self.queue, &mut render_pass);
@@ -727,6 +743,8 @@ impl State {
                     quad_height,
                 );
             }
+
+            rp.execute_with_renderpass(&mut render_pass, &primitives, &descriptor);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -903,18 +921,18 @@ impl RenderedPage {
     }
 }
 
-async fn run() {
+fn run() {
     env_logger::init();
 
     let args: Vec<String> = std::env::args().collect();
     let exe_name = &args[0];
     let filename = if args.len() != 2 {
-        "/home/paul/Downloads/remotesensing-1853970.pdf"
+        String::from("/home/paul/Downloads/remotesensing-1853970.pdf")
     } else {
-        &args[1]
+        args.last().take().unwrap().to_string()
     };
 
-    let doc = mupdf::Document::open(filename).unwrap();
+    let doc = mupdf::Document::open(&filename).unwrap();
 
     let mut page_count = 0;
     let total_page_count = doc.page_count().unwrap() as usize;
@@ -929,8 +947,6 @@ async fn run() {
     let page = &mut pages[page_count];
     let bounds = page.page.bounds().unwrap();
 
-    dbg!(bounds);
-
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
         .with_title(format!("{} - {}", filename, exe_name))
@@ -941,7 +957,7 @@ async fn run() {
         .build(&event_loop)
         .unwrap();
 
-    let mut state = State::new(&window).await;
+    let mut state = pollster::block_on(State::new(&window));
     state.highlight_first_blocks(page).unwrap();
 
     let scale_factor = window.scale_factor();
@@ -949,6 +965,11 @@ async fn run() {
 
     let winsize = window.inner_size();
     state.create_texture(&page.pixmap, winsize.width, winsize.height, false);
+
+    let mut egui_state = egui_winit::State::new(&event_loop);
+    let mut ctx = egui::Context::default();
+    let mut rp =
+        egui_wgpu::renderer::RenderPass::new(&state.device, wgpu::TextureFormat::Bgra8UnormSrgb, 1);
 
     // for block in page.textpage.blocks() {
     //     for line in block.lines() {
@@ -968,19 +989,20 @@ async fn run() {
     // let pixmap = page
     //     .to_pixmap(&mat, &Colorspace::device_rgb(), 1., false)
     //     .unwrap();
+    let mut cursor: Option<egui::CursorIcon> = None;
 
     event_loop.run(move |event, _, control_flow| match event {
         Event::WindowEvent {
             ref event,
             window_id,
         } if window_id == window.id() => {
-            if !state.input(event) {
+            if !egui_state.on_event(&mut ctx, &event) {
                 match event {
                     WindowEvent::CursorMoved { position, .. } => {
                         if state.hovers_line(*position) {
-                            window.set_cursor_icon(winit::window::CursorIcon::Text);
+                            cursor = Some(egui::CursorIcon::Text);
                         } else {
-                            window.set_cursor_icon(winit::window::CursorIcon::Default);
+                            cursor = None;
                         }
                     }
                     WindowEvent::CloseRequested
@@ -1014,7 +1036,12 @@ async fn run() {
                             let page = &pages[page_count];
                             let winsize = window.inner_size();
                             state.highlight_first_blocks(page).unwrap();
-                            state.create_texture(&page.pixmap, winsize.width, winsize.height, false);
+                            state.create_texture(
+                                &page.pixmap,
+                                winsize.width,
+                                winsize.height,
+                                false,
+                            );
                         }
                         VirtualKeyCode::Right => {
                             page_count = (page_count + 1).min(total_page_count - 1);
@@ -1026,7 +1053,12 @@ async fn run() {
                             let page = &pages[page_count];
                             let winsize = window.inner_size();
                             state.highlight_first_blocks(page).unwrap();
-                            state.create_texture(&page.pixmap, winsize.width, winsize.height, false);
+                            state.create_texture(
+                                &page.pixmap,
+                                winsize.width,
+                                winsize.height,
+                                false,
+                            );
                         }
                         VirtualKeyCode::B => {
                             state.render_blocks = !state.render_blocks;
@@ -1052,19 +1084,44 @@ async fn run() {
                 let page_width = pages[page_count].page.bounds().unwrap().width();
                 let new_scale_factor = winsize.width as f32 / page_width;
                 pages[page_count].rerender(new_scale_factor as f32).unwrap();
-                state.create_texture(&pages[page_count].pixmap, winsize.width, winsize.height, true);
+                state.create_texture(
+                    &pages[page_count].pixmap,
+                    winsize.width,
+                    winsize.height,
+                    true,
+                );
             }
 
+            let mut output = ctx.run(egui_state.take_egui_input(&window), |ctx| {
+                egui::TopBottomPanel::bottom("bottom_panel").show(&ctx, |ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(format!("{}/{}", page_count + 1, doc.page_count().unwrap()));
+                        ui.centered_and_justified(|ui| {
+                            ui.label(&filename);
+                        });
+                    });
+                });
+            });
+            if let Some(cursor) = cursor && !ctx.is_pointer_over_area() {
+                output.platform_output.cursor_icon = cursor;
+            }
+            egui_state.handle_platform_output(&window, &ctx, output.platform_output);
+
+            let primitives = ctx.tessellate(output.shapes);
+            let textures = output.textures_delta;
+
+            state.resize(winsize);
             state.update(
                 pages[page_count].pixmap.width(),
                 pages[page_count].pixmap.height(),
                 winsize.width,
                 winsize.height,
             );
-            match state.render() {
+
+            match state.render(&mut rp, primitives, textures) {
                 Ok(_) => {}
 
-                Err(wgpu::SurfaceError::Lost) => state.resize(state.size),
+                Err(wgpu::SurfaceError::Lost) => state.resize(winsize),
                 Err(wgpu::SurfaceError::OutOfMemory) => *control_flow = ControlFlow::Exit,
                 Err(e) => println!("error: {:?}", e),
             }
@@ -1077,45 +1134,11 @@ async fn run() {
 }
 
 fn main() {
-    // let ctx = mupdf::Context::default();
+    let subscriber = tracing_subscriber::FmtSubscriber::builder()
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
 
-    // to_ppm(&pixmap, "output.ppm").unwrap();
-    // let mut file = std::fs::File::create("output.png").unwrap();
-    // pixmap.write_to(&mut file, mupdf::ImageFormat::PNG).unwrap();
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
-    pollster::block_on(run());
-}
-
-fn _to_ppm(pixmap: &mupdf::Pixmap, filepath: &str) -> Result<(), std::io::Error> {
-    let mut file = std::fs::File::create(filepath)?;
-    file.write(b"P3\n")?;
-    file.write_fmt(format_args!("{} {} 255\n", pixmap.width(), pixmap.height()))?;
-
-    let pixels = pixmap.samples();
-    let stride = pixmap.stride() as usize;
-
-    let mut y: usize = 0;
-    while y < pixmap.height() as usize {
-        let mut x: usize = 0;
-        let new_pos = y * stride;
-        let row_pixels = &pixels[new_pos..new_pos + stride];
-        while x < pixmap.n() as usize * pixmap.width() as usize {
-            if pixmap.n() == 4 && row_pixels[x + 3] == 0 {
-                // TODO: Use the real formula.
-                // Hacky rendering of alpha values but hey
-                file.write(b"255 255 255\n")?;
-            } else {
-                file.write_fmt(format_args!(
-                    "{} {} {}\n",
-                    row_pixels[x],
-                    row_pixels[x + 1],
-                    row_pixels[x + 2],
-                ))?;
-            }
-            x += pixmap.n() as usize;
-        }
-        y += 1;
-    }
-
-    Ok(())
+    run();
 }
