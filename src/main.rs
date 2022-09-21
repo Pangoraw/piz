@@ -753,7 +753,7 @@ impl RenderedPage {
     pub fn new(doc: &mupdf::Document, page_count: i32) -> Result<Self, mupdf::Error> {
         let page = doc.load_page(page_count)?;
 
-        let scale = 1.;
+        let scale = 2.;
         let mat = mupdf::Matrix::new_scale(scale, scale);
 
         let pixmap = page.to_pixmap(&mat, &Colorspace::device_rgb(), 1., false)?;
