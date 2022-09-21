@@ -284,12 +284,11 @@ impl BlocksRenderPipeline {
             .map(|q| q.get_vertices(tw, th, qw, qh))
             .flatten()
             .collect();
-        let indices: Vec<u16> = (0..self.quads.len())
-            .map(|i| 4 * i)
+        let indices: Vec<u16> = (0..4 * self.quads.len())
+            .step_by(4)
+            .map(|i| i as u16)
             .map(|i| [i + 0, i + 2, i + 1, i + 0, i + 3, i + 2])
-            .take(self.quads.len())
             .flatten()
-            .map(|x| x as u16)
             .collect();
 
         if self.capacity <= self.quads.len() {
