@@ -1066,7 +1066,7 @@ fn run() {
                         VirtualKeyCode::L => {
                             state.render_lines = !state.render_lines;
                         }
-                        _ => unreachable!(),
+                        _ => {}
                     },
                     WindowEvent::Resized(physical_size) => {
                         state.resize(*physical_size);
@@ -1093,14 +1093,20 @@ fn run() {
             }
 
             let mut output = ctx.run(egui_state.take_egui_input(&window), |ctx| {
-                egui::TopBottomPanel::bottom("bottom_panel").show(&ctx, |ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(format!("{}/{}", page_count + 1, doc.page_count().unwrap()));
-                        ui.centered_and_justified(|ui| {
-                            ui.label(&filename);
+                egui::TopBottomPanel::bottom("bottom_panel")
+                    .show(&ctx, |ui| {
+                        ui.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(egui::RichText::new(format!(
+                                "{}/{}",
+                                page_count + 1,
+                                doc.page_count().unwrap()
+                            )).size(20.));
+                            ui.centered_and_justified(|ui| {
+                                ui.add(egui::Label::new(egui::RichText::new(&filename).size(20.)).wrap(false));
+                            });
                         });
                     });
-                });
             });
             if let Some(cursor) = cursor && !ctx.is_pointer_over_area() {
                 output.platform_output.cursor_icon = cursor;
