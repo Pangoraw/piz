@@ -1067,8 +1067,12 @@ fn run() {
                             state.page_render_pipeline.renderer.quad_width,
                             state.page_render_pipeline.renderer.quad_height,
                         ) {
-                            // TODO: navigate to the page
-                            println!("{:?}", link.uri);
+                            if let Some(uri) = link.uri.strip_prefix("#page=") {
+                                if let Some((page_number, _)) = uri.split_once('&') {
+                                    let page_number = usize::from_str_radix(page_number, 10).unwrap();
+                                    page_count = page_number; // Navigate to page
+                                }
+                            }
                         }
                     }
                     WindowEvent::KeyboardInput {
