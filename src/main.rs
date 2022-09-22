@@ -1072,6 +1072,8 @@ fn run() {
                                     let page_number = usize::from_str_radix(page_number, 10).unwrap();
                                     page_count = page_number; // Navigate to page
                                 }
+                            } else {
+                                dbg!(link.uri);
                             }
                         }
                     }
@@ -1095,6 +1097,7 @@ fn run() {
 
                             let page = &pages[page_count];
                             let winsize = window.inner_size();
+                            state.highlight_links(page).unwrap();
                             state.highlight_blocks(page).unwrap();
                             state.create_texture(
                                 &page.pixmap,
