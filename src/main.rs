@@ -93,7 +93,7 @@ impl QuadRenderer {
     }
 
     /// Transforms from the absolute screen/quad space [0, w/h]
-    /// to relative quad space.
+    /// to relative quad space [0, 1].
     pub fn from_abs_quad(&self, x: f32, y: f32) -> Point {
         Point {
             x: x / self.quad_width as f32,
@@ -111,6 +111,12 @@ impl QuadRenderer {
             x: text_x / self.texture_width as f32,
             y: text_y / self.texture_height as f32,
         }
+    }
+
+    /// Checks whether the point in texture position [0, 1] is in
+    /// the texture.
+    pub fn contains(&self, point: &Point) -> bool {
+        1. <= point.x && point.x <= 0. && 1. <= point.y && point.y <= 0.
     }
 
     pub fn get_vertices(&self) -> [Vertex; 4] {
@@ -294,11 +300,11 @@ impl BlocksRenderPipeline {
         }
     }
 
-    fn render<'a, 'b>(
+    fn render<'a>(
         &'a mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        render_pass: &'b mut wgpu::RenderPass<'a>,
+        render_pass: &mut wgpu::RenderPass<'a>,
         renderer: &QuadRenderer,
     ) {
         render_pass.set_pipeline(&self.render_pipeline);
@@ -338,17 +344,16 @@ impl BlocksRenderPipeline {
         render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
     }
 
-    fn find_hovering<I, T>(&self, it: I, point: Point) -> Option<T>
+    /// Returns the first item zipped with the Quad that contains the given Point
+    /// in texture space [0, 1].
+    fn find_hovering<I, T>(&self, it: I, point: &Point) -> Option<T>
     where
         I: Iterator<Item = T>,
     {
         let quads = &self.quads;
 
-        let x = point.x;
-        let y = point.y;
-
         for (item, quad) in std::iter::zip(it, quads) {
-            if quad.x < x && x < quad.x + quad.width && quad.y < y && y < quad.y + quad.height {
+            if point.contained_in(quad) {
                 return Some(item);
             }
         }
@@ -356,8 +361,8 @@ impl BlocksRenderPipeline {
         None
     }
 
-    fn hovers_quad(&self, point: Point) -> bool {
-        return self.find_hovering(std::iter::repeat(()), point).is_some();
+    fn hovers_quad(&self, point: &Point) -> bool {
+        return self.find_hovering(std::iter::repeat(()), &point).is_some();
     }
 
     fn clear_blocks(&mut self) {
@@ -369,14 +374,18 @@ impl BlocksRenderPipeline {
     }
 }
 
+#[derive(Clone, Debug)]
 struct Point {
     x: f32,
     y: f32,
 }
 
 impl Point {
-    fn contained_in(&self, quad: mupdf::Quad) -> bool {
-        quad.ul.x < self.x && quad.ul.y < self.y && quad.lr.x > self.x && quad.lr.y > self.y
+    fn contained_in(&self, quad: &Quad) -> bool {
+        quad.x + quad.width >= self.x
+            && self.x >= quad.x
+            && quad.y + quad.height >= self.y
+            && self.y >= quad.y
     }
 
     fn to_vertex_space(&self) -> (f32, f32) {
@@ -465,11 +474,11 @@ impl TextHighlighter {
         */
     }
 
-    fn render<'a, 'b>(
+    fn render<'a>(
         &'a mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        render_pass: &'b mut wgpu::RenderPass<'a>,
+        render_pass: &mut wgpu::RenderPass<'a>,
         renderer: &QuadRenderer,
     ) {
         self.block_render_pipeline
@@ -487,6 +496,10 @@ struct PageRenderPipeline {
     bind_group: Option<wgpu::BindGroup>,
 
     renderer: QuadRenderer,
+
+    block_render_pipeline: BlocksRenderPipeline,
+    line_render_pipeline: BlocksRenderPipeline,
+    link_render_pipeline: BlocksRenderPipeline,
 }
 
 impl PageRenderPipeline {
@@ -576,6 +589,10 @@ impl PageRenderPipeline {
             usage: wgpu::BufferUsages::INDEX,
         });
 
+        let block_render_pipeline = BlocksRenderPipeline::new(&device, 0, &config, &shader);
+        let line_render_pipeline = BlocksRenderPipeline::new(&device, 0, &config, &shader);
+        let link_render_pipeline = BlocksRenderPipeline::new(&device, 0, &config, &shader);
+
         let page_render_pipeline = PageRenderPipeline {
             texture: None,
             render_pipeline,
@@ -595,9 +612,72 @@ impl PageRenderPipeline {
                 quad_height: 0,
                 changed: true,
             },
+
+            block_render_pipeline,
+            line_render_pipeline,
+            link_render_pipeline,
         };
 
         return page_render_pipeline;
+    }
+
+    fn highlight_blocks(&mut self, page: &RenderedPage) -> Result<(), mupdf::Error> {
+        self.block_render_pipeline.clear_blocks();
+        self.line_render_pipeline.clear_blocks();
+
+        let page_bounds = page.page.bounds()?;
+
+        let blocks = page.textpage.blocks();
+        for block in blocks {
+            for line in block.lines() {
+                let rect = line.bounds();
+
+                self.line_render_pipeline.add_block(Quad {
+                    x: rect.x0 / page_bounds.width(),
+                    y: rect.y0 / page_bounds.height(),
+                    width: (rect.x1 - rect.x0) / page_bounds.width(),
+                    height: (rect.y1 - rect.y0) / page_bounds.height(),
+                });
+            }
+            let rect = block.bounds();
+            self.block_render_pipeline.add_block(Quad {
+                x: rect.x0 / page_bounds.width(),
+                y: rect.y0 / page_bounds.height(),
+                width: (rect.x1 - rect.x0) / page_bounds.width(),
+                height: (rect.y1 - rect.y0) / page_bounds.height(),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn highlight_links(&mut self, page: &RenderedPage) -> Result<(), mupdf::Error> {
+        self.link_render_pipeline.clear_blocks();
+
+        let page_bounds = page.page.bounds()?;
+        for link in page.page.links()? {
+            let rect = link.bounds;
+            self.link_render_pipeline.add_block(Quad {
+                x: rect.x0 / page_bounds.width(),
+                y: rect.y0 / page_bounds.height(),
+                width: (rect.x1 - rect.x0) / page_bounds.width(),
+                height: (rect.y1 - rect.y0) / page_bounds.height(),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn hovers_link(&self, pos: winit::dpi::PhysicalPosition<f64>) -> bool {
+        return self
+            .link_render_pipeline
+            .hovers_quad(&self.from_pos_to_page(pos));
+    }
+
+    fn hovers_line(&self, pos: winit::dpi::PhysicalPosition<f64>) -> bool {
+        return self
+            .line_render_pipeline
+            .hovers_quad(&self.from_pos_to_page(pos));
     }
 
     pub fn create_texture(
@@ -676,10 +756,13 @@ impl PageRenderPipeline {
             self.bind_group = Some(diffuse_bind_group);
         }
     }
-    pub fn render<'a, 'b>(
-        &'a self,
+    pub fn render<'a>(
+        &'a mut self,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
-        render_pass: &'b mut wgpu::RenderPass<'a>,
+        render_pass: &mut wgpu::RenderPass<'a>,
+        render_blocks: bool,
+        render_lines: bool,
     ) {
         render_pass.set_pipeline(&self.render_pipeline);
         render_pass.set_bind_group(0, &self.bind_group.as_ref().unwrap(), &[]);
@@ -692,6 +775,17 @@ impl PageRenderPipeline {
         render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         render_pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+
+        if render_blocks {
+            self.block_render_pipeline
+                .render(device, queue, render_pass, &self.renderer);
+        }
+        if render_lines {
+            self.line_render_pipeline
+                .render(device, queue, render_pass, &self.renderer);
+        }
+        self.link_render_pipeline
+            .render(&device, &queue, render_pass, &self.renderer);
     }
 
     fn from_pos_to_page(&self, pos: winit::dpi::PhysicalPosition<f64>) -> Point {
@@ -700,23 +794,182 @@ impl PageRenderPipeline {
     }
 }
 
+struct RenderedPage {
+    page: mupdf::Page,
+    pixmap: mupdf::Pixmap,
+    textpage: mupdf::TextPage,
+}
+
+impl RenderedPage {
+    pub fn new(doc: &mupdf::Document, page_count: i32) -> Result<Self, mupdf::Error> {
+        let page = doc.load_page(page_count)?;
+
+        // TODO: Create pixmap with right size
+        let mat = mupdf::Matrix::new_scale(1., 1.);
+        let pixmap = page.to_pixmap(&mat, &mupdf::Colorspace::device_rgb(), 1., false)?;
+        let textpage = page.to_text_page(mupdf::TextPageOptions::BLOCK_TEXT)?;
+        Ok(Self {
+            page,
+            pixmap,
+            textpage,
+        })
+    }
+
+    fn rerender(&mut self, scale_factor: f32) -> Result<(), mupdf::Error> {
+        let mat = mupdf::Matrix::new_scale(scale_factor, scale_factor);
+        self.pixmap = self
+            .page
+            .to_pixmap(&mat, &mupdf::Colorspace::device_rgb(), 1., false)?;
+        Ok(())
+    }
+}
+
+struct Page {
+    render_pipeline: PageRenderPipeline,
+    page: RenderedPage,
+}
+
+impl Page {
+    fn new(
+        device: &wgpu::Device,
+        config: &wgpu::SurfaceConfiguration,
+        shader: &wgpu::ShaderModule,
+        doc: &mupdf::Document,
+        page_count: i32,
+    ) -> Result<Self, mupdf::Error> {
+        let render_pipeline = PageRenderPipeline::new(&device, &config, &shader);
+        let rendered_page = RenderedPage::new(doc, page_count)?;
+        Ok(Self {
+            render_pipeline,
+            page: rendered_page,
+        })
+    }
+
+    fn create_texture(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        winwidth: u32,
+        winheight: u32,
+        force: bool,
+    ) {
+        if self.physical_width() != winwidth {
+            self.page
+                .rerender(winwidth as f32 / self.width().unwrap())
+                .unwrap();
+        }
+
+        self.render_pipeline.create_texture(
+            device,
+            queue,
+            &self.page.pixmap,
+            winwidth,
+            winheight,
+            force,
+        );
+    }
+
+    fn highlight_blocks(&mut self) -> Result<(), mupdf::Error> {
+        self.render_pipeline.highlight_blocks(&self.page)?;
+        Ok(())
+    }
+
+    pub fn highlight_links(&mut self) -> Result<(), mupdf::Error> {
+        self.render_pipeline.highlight_links(&self.page)?;
+        Ok(())
+    }
+
+    pub fn hovers_link(&self, position: winit::dpi::PhysicalPosition<f64>) -> bool {
+        self.render_pipeline.hovers_link(position)
+    }
+
+    pub fn hovers_line(&self, position: winit::dpi::PhysicalPosition<f64>) -> bool {
+        self.render_pipeline.hovers_line(position)
+    }
+
+    fn find_hovering_link(&self, point: &Point) -> Option<mupdf::Link> {
+        match self.page.page.links() {
+            Ok(links) => self
+                .render_pipeline
+                .link_render_pipeline
+                .find_hovering(links, point),
+            Err(_) => None,
+        }
+    }
+
+    fn width(&self) -> Result<f32, mupdf::Error> {
+        let rect = self.page.page.bounds()?;
+        Ok(rect.width())
+    }
+
+    fn height(&self) -> Result<f32, mupdf::Error> {
+        let rect = self.page.page.bounds()?;
+        Ok(rect.height())
+    }
+
+    fn physical_width(&self) -> u32 {
+        self.render_pipeline.renderer.texture_width
+    }
+
+    fn physical_height(&self) -> u32 {
+        self.render_pipeline.renderer.texture_height
+    }
+
+    fn update(
+        &mut self,
+        x: f32,
+        y: f32,
+        winwidth: u32,
+        winheight: u32,
+    ) -> Result<(), mupdf::Error> {
+        let quad_w = self.render_pipeline.renderer.quad_width;
+        let quad_h = self.render_pipeline.renderer.quad_height;
+
+        self.render_pipeline.renderer.update(
+            x,
+            y,
+            self.page.pixmap.width(),
+            self.page.pixmap.height(),
+            winwidth,
+            winheight,
+        );
+
+        if quad_w != winwidth || quad_h != winheight {
+            self.page.rerender(winwidth as f32 / self.width()?)?;
+        }
+
+        Ok(())
+    }
+
+    fn render<'a>(
+        &'a mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        render_pass: &mut wgpu::RenderPass<'a>,
+        render_blocks: bool,
+        render_lines: bool,
+    ) {
+        self.render_pipeline
+            .render(device, queue, render_pass, render_blocks, render_lines);
+    }
+}
+
 struct State {
     surface: wgpu::Surface,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    shader: wgpu::ShaderModule,
+
     size: winit::dpi::PhysicalSize<u32>,
 
-    page_render_pipeline: PageRenderPipeline,
-    page_render_pipeline2: PageRenderPipeline,
-
-    // TODO: Should be in the page
-    block_render_pipeline: BlocksRenderPipeline,
-    line_render_pipeline: BlocksRenderPipeline,
-    link_render_pipeline: BlocksRenderPipeline,
+    pages: Vec<Page>,
+    position: Point,
+    page_count: usize,
 
     render_blocks: bool,
     render_lines: bool,
+    show_debug: bool,
 }
 
 impl State {
@@ -755,30 +1008,41 @@ impl State {
 
         let shader = device.create_shader_module(include_wgsl!("shader.wgsl"));
 
-        let block_render_pipeline = BlocksRenderPipeline::new(&device, 10, &config, &shader);
-        let line_render_pipeline = BlocksRenderPipeline::new(&device, 10, &config, &shader);
-        let link_render_pipeline = BlocksRenderPipeline::new(&device, 10, &config, &shader);
-
-        let page_render_pipeline = PageRenderPipeline::new(&device, &config, &shader);
-        let page_render_pipeline2 = PageRenderPipeline::new(&device, &config, &shader);
-
         Self {
             surface,
             device,
             queue,
             config,
             size,
+            shader,
 
-            page_render_pipeline,
-            page_render_pipeline2,
-
-            block_render_pipeline,
-            line_render_pipeline,
-            link_render_pipeline,
+            pages: vec![],
+            position: Point { x: 0., y: 0. },
+            page_count: 0,
 
             render_blocks: false,
             render_lines: false,
+            show_debug: false,
         }
+    }
+
+    fn add_page(&mut self, doc: &mupdf::Document, page_count: i32) -> Result<(), mupdf::Error> {
+        if page_count >= doc.page_count()? {
+            return Ok(());
+        }
+
+        let mut page = Page::new(&self.device, &self.config, &self.shader, doc, page_count)?;
+        page.highlight_blocks()?;
+        page.highlight_links()?;
+        page.create_texture(
+            &self.device,
+            &self.queue,
+            self.size.width,
+            self.size.height,
+            false,
+        );
+        self.pages.push(page);
+        Ok(())
     }
 
     fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
@@ -788,33 +1052,35 @@ impl State {
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
         }
+
+        // FIXME: hot path
+        self.create_texture(new_size.width, new_size.height, true);
     }
 
-    fn update(
-        &mut self,
-        x: f32,
-        y: f32,
-        texture_width: u32,
-        texture_height: u32,
-        winwidth: u32,
-        winheight: u32,
-    ) {
-        self.page_render_pipeline.renderer.update(
-            x,
-            y,
-            texture_width,
-            texture_height,
-            winwidth,
-            winheight,
-        );
-        self.page_render_pipeline2.renderer.update(
-            x,
-            y + texture_height as f32,
-            texture_width,
-            texture_height,
-            winwidth,
-            winheight,
-        );
+    fn update(&mut self, doc: &mupdf::Document) -> Result<(), mupdf::Error> {
+        let mut offset = 0.;
+        for (i, page) in self.pages.iter_mut().enumerate() {
+            page.update(
+                self.position.x,
+                self.position.y + offset,
+                self.size.width,
+                self.size.height,
+            )?;
+
+            if -self.position.y >= offset {
+                self.page_count = i;
+            }
+
+            offset += page.physical_height() as f32;
+        }
+
+        // offset sums the physical height of all pages
+        // if offset is now in frame, create a page.
+        if -self.position.y < offset && -self.position.y + self.size.height as f32 > offset {
+            self.add_page(doc, self.pages.len() as i32).unwrap();
+        }
+
+        Ok(())
     }
 
     fn render(
@@ -823,8 +1089,8 @@ impl State {
         primitives: Vec<egui::epaint::ClippedPrimitive>,
         textures: egui::TexturesDelta,
     ) -> Result<(), wgpu::SurfaceError> {
-        let quad_width = self.page_render_pipeline.renderer.quad_width;
-        let quad_height = self.page_render_pipeline.renderer.quad_height;
+        let quad_width = self.size.width;
+        let quad_height = self.size.height;
 
         let descriptor = egui_wgpu::renderer::ScreenDescriptor {
             size_in_pixels: [quad_width, quad_height],
@@ -867,158 +1133,80 @@ impl State {
                 depth_stencil_attachment: None,
             });
 
-            self.page_render_pipeline
-                .render(&self.queue, &mut render_pass);
-            self.page_render_pipeline2
-                .render(&self.queue, &mut render_pass);
-            if self.render_blocks {
-                self.block_render_pipeline.render(
+            for page in self.pages.iter_mut() {
+                page.render(
                     &self.device,
                     &self.queue,
                     &mut render_pass,
-                    &self.page_render_pipeline.renderer,
+                    self.render_blocks,
+                    self.render_lines,
                 );
             }
-            if self.render_lines {
-                self.line_render_pipeline.render(
-                    &self.device,
-                    &self.queue,
-                    &mut render_pass,
-                    &self.page_render_pipeline.renderer,
-                );
-            }
-            self.link_render_pipeline.render(
-                &self.device,
-                &self.queue,
-                &mut render_pass,
-                &self.page_render_pipeline.renderer,
-            );
-
             rp.execute_with_renderpass(&mut render_pass, &primitives, &descriptor);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
 
-        self.page_render_pipeline.renderer.changed = false;
+        for page in self.pages.iter_mut() {
+            page.render_pipeline.renderer.changed = false;
+        }
 
         Ok(())
     }
 
-    fn highlight_blocks(&mut self, page: &RenderedPage) -> Result<(), mupdf::Error> {
-        self.block_render_pipeline.clear_blocks();
-        self.line_render_pipeline.clear_blocks();
+    fn visible_pages<'a>(&'a mut self) -> Vec<&'a Page> {
+        self.pages.iter().collect::<Vec<&Page>>()
+    }
 
-        let page_bounds = page.page.bounds()?;
+    fn create_texture(&mut self, winwidth: u32, winheight: u32, force: bool) {
+        for page in self.pages.iter_mut() {
+            page.create_texture(&self.device, &self.queue, winwidth, winheight, force);
+        }
+    }
 
-        let blocks = page.textpage.blocks();
-        for block in blocks {
-            for line in block.lines() {
-                let rect = line.bounds();
+    fn hovers_link(&self, position: winit::dpi::PhysicalPosition<f64>) -> bool {
+        self.pages.iter().any(|page| page.hovers_link(position))
+    }
 
-                self.line_render_pipeline.add_block(Quad {
-                    x: rect.x0 / page_bounds.width(),
-                    y: rect.y0 / page_bounds.height(),
-                    width: (rect.x1 - rect.x0) / page_bounds.width(),
-                    height: (rect.y1 - rect.y0) / page_bounds.height(),
-                });
+    fn hovers_line(&self, position: winit::dpi::PhysicalPosition<f64>) -> bool {
+        self.pages.iter().any(|page| page.hovers_line(position))
+    }
+
+    fn find_hovering_link(&self, pos: winit::dpi::PhysicalPosition<f64>) -> Option<mupdf::Link> {
+        // TODO: filter pages based on their big quad instead of iterating every page
+        let mut i = 0;
+        for page in &self.pages {
+            let point = page.render_pipeline.from_pos_to_page(pos);
+            if page.render_pipeline.renderer.contains(&point) {
+                println!("match = {}", i);
             }
-            let rect = block.bounds();
-            self.block_render_pipeline.add_block(Quad {
-                x: rect.x0 / page_bounds.width(),
-                y: rect.y0 / page_bounds.height(),
-                width: (rect.x1 - rect.x0) / page_bounds.width(),
-                height: (rect.y1 - rect.y0) / page_bounds.height(),
-            });
+            i += 1;
+
+            match page.find_hovering_link(&point) {
+                opt @ Some(_) => return opt,
+                None => continue,
+            }
         }
-
-        Ok(())
+        None
     }
 
-    fn highlight_links(&mut self, page: &RenderedPage) -> Result<(), mupdf::Error> {
-        self.link_render_pipeline.clear_blocks();
-
-        let page_bounds = page.page.bounds()?;
-        for link in page.page.links()? {
-            let rect = link.bounds;
-            self.link_render_pipeline.add_block(Quad {
-                x: rect.x0 / page_bounds.width(),
-                y: rect.y0 / page_bounds.height(),
-                width: (rect.x1 - rect.x0) / page_bounds.width(),
-                height: (rect.y1 - rect.y0) / page_bounds.height(),
-            });
-        }
-
-        Ok(())
-    }
-
-    fn hovers_link(&self, pos: winit::dpi::PhysicalPosition<f64>) -> bool {
-        return self
-            .link_render_pipeline
-            .hovers_quad(self.page_render_pipeline.from_pos_to_page(pos));
-    }
-
-    fn hovers_line(&self, pos: winit::dpi::PhysicalPosition<f64>) -> bool {
-        return self
-            .line_render_pipeline
-            .hovers_quad(self.page_render_pipeline.from_pos_to_page(pos));
-    }
-
-    fn create_texture(
+    fn navigate_to(
         &mut self,
-        pixmap: &mupdf::Pixmap,
-        winwidth: u32,
-        winheight: u32,
-        force: bool,
-        first: bool,
-    ) {
-        if first {
-            self.page_render_pipeline.create_texture(
-                &self.device,
-                &self.queue,
-                pixmap,
-                winwidth,
-                winheight,
-                force,
-            );
-        } else {
-            self.page_render_pipeline2.create_texture(
-                &self.device,
-                &self.queue,
-                pixmap,
-                winwidth,
-                winheight,
-                force,
-            );
+        doc: &mupdf::Document,
+        page_number: usize,
+    ) -> Result<(), mupdf::Error> {
+        // Add missing pages
+        while self.pages.len() <= page_number {
+            self.add_page(doc, self.pages.len() as i32)?;
         }
-    }
-}
 
-struct RenderedPage {
-    page: mupdf::Page,
-    pixmap: mupdf::Pixmap,
-    textpage: mupdf::TextPage,
-}
+        self.position.y = 0.;
+        for page in self.pages.iter().take(page_number) {
+            self.position.y -= page.physical_height() as f32;
+        }
+        self.page_count = page_number;
 
-impl RenderedPage {
-    pub fn new(doc: &mupdf::Document, page_count: i32) -> Result<Self, mupdf::Error> {
-        let page = doc.load_page(page_count)?;
-
-        let mat = mupdf::Matrix::new_scale(1., 1.);
-        let pixmap = page.to_pixmap(&mat, &mupdf::Colorspace::device_rgb(), 1., false)?;
-        let textpage = page.to_text_page(mupdf::TextPageOptions::BLOCK_TEXT)?;
-        Ok(Self {
-            page,
-            pixmap,
-            textpage,
-        })
-    }
-
-    fn rerender(&mut self, scale_factor: f32) -> Result<(), mupdf::Error> {
-        let mat = mupdf::Matrix::new_scale(scale_factor, scale_factor);
-        self.pixmap = self
-            .page
-            .to_pixmap(&mat, &mupdf::Colorspace::device_rgb(), 1., false)?;
         Ok(())
     }
 }
@@ -1041,53 +1229,37 @@ fn run() {
     };
 
     let doc = mupdf::Document::open(&filename).unwrap();
-
-    let mut page_count = 0;
-    let total_page_count = doc.page_count().unwrap() as usize;
-
-    let mut ctx = mupdf::context::Context::get();
-    ctx.set_text_aa_level(8);
-
-    let mut pages = vec![RenderedPage::new(&doc, 0).unwrap()];
-    if total_page_count > 1 {
-        pages.push(RenderedPage::new(&doc, 1).unwrap());
-    }
-    let page = &mut pages[page_count];
-    let bounds = page.page.bounds().unwrap();
+    let (winwidth, winheight) = {
+        let first_page = doc.load_page(0).unwrap();
+        let pixmap = first_page
+            .to_pixmap(
+                &mupdf::Matrix::IDENTITY,
+                &mupdf::Colorspace::device_rgb(),
+                1.,
+                false,
+            )
+            .unwrap();
+        (pixmap.width(), pixmap.height())
+    };
 
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
         .with_title(format!("{} - {}", prettyname, exe_name))
-        .with_inner_size(winit::dpi::LogicalSize::new(
-            bounds.width(),
-            bounds.height(),
-        ))
+        .with_inner_size(winit::dpi::LogicalSize::new(winwidth, winheight))
         .build(&event_loop)
         .unwrap();
 
     let mut state = pollster::block_on(State::new(&window));
-    state.highlight_links(page).unwrap();
-    state.highlight_blocks(page).unwrap();
-
-    let scale_factor = window.scale_factor();
-    page.rerender(scale_factor as f32).unwrap();
-
-    let winsize = window.inner_size();
-    state.create_texture(&page.pixmap, winsize.width, winsize.height, false, true);
-
-    let page2 = &pages[1];
-    state.create_texture(&page2.pixmap, winsize.width, winsize.height, false, false);
+    state.add_page(&doc, 0).unwrap();
+    state.add_page(&doc, 1).unwrap();
 
     let mut egui_state = egui_winit::State::new(&event_loop);
     let mut ctx = egui::Context::default();
     let mut rp =
-        egui_wgpu::renderer::RenderPass::new(&state.device, wgpu::TextureFormat::Rgba8UnormSrgb, 1);
+        egui_wgpu::renderer::RenderPass::new(&state.device, wgpu::TextureFormat::Bgra8UnormSrgb, 1);
 
     let mut cursor: Option<egui::CursorIcon> = None;
     let mut cursor_position = winit::dpi::PhysicalPosition { x: 0., y: 0. };
-
-    let mut x = 0.;
-    let mut y = 0.;
 
     event_loop.run(move |event, _, control_flow| match event {
         Event::WindowEvent {
@@ -1120,26 +1292,23 @@ fn run() {
                         delta: winit::event::MouseScrollDelta::LineDelta(xd, yd),
                         ..
                     } => {
-                        x += xd * 10.;
-                        y += yd * 10.;
+                        state.position.x += 10. * xd;
+                        state.position.y = (state.position.y + 10. * yd).min(0.);
                     }
                     WindowEvent::MouseInput {
                         state: winit::event::ElementState::Pressed,
                         ..
                     } => {
-                        let point = state.page_render_pipeline.from_pos_to_page(cursor_position);
-                        if let Some(link) = state
-                            .link_render_pipeline
-                            .find_hovering(pages[page_count].page.links().unwrap(), point)
-                        {
+                        if let Some(link) = state.find_hovering_link(cursor_position) {
                             if let Some(uri) = link.uri.strip_prefix("#page=") {
                                 if let Some((page_number, _)) = uri.split_once('&') {
                                     let page_number =
                                         usize::from_str_radix(page_number, 10).unwrap();
-                                    page_count = page_number; // Navigate to page
+                                    state.navigate_to(&doc, page_number).unwrap();
+                                    // Navigate to page
                                 }
                             } else {
-                                dbg!(link.uri);
+                                dbg!(&link.uri);
                             }
                         }
                     }
@@ -1151,52 +1320,20 @@ fn run() {
                                     Some(
                                         keycode @ (VirtualKeyCode::Left
                                         | VirtualKeyCode::Right
-                                        | VirtualKeyCode::B
-                                        | VirtualKeyCode::L),
+                                        | VirtualKeyCode::D),
                                     ),
                                 ..
                             },
                         ..
                     } => match keycode {
-                        VirtualKeyCode::Left if page_count > 0 => {
-                            page_count = (page_count - 1).max(0);
-
-                            let page = &pages[page_count];
-                            let winsize = window.inner_size();
-                            state.highlight_links(page).unwrap();
-                            state.highlight_blocks(page).unwrap();
-                            state.create_texture(
-                                &page.pixmap,
-                                winsize.width,
-                                winsize.height,
-                                false,
-                                false,
-                            );
+                        VirtualKeyCode::Left if state.page_count > 0 => {
+                            state.navigate_to(&doc, state.page_count - 1).unwrap();
                         }
                         VirtualKeyCode::Right => {
-                            page_count = (page_count + 1).min(total_page_count - 1);
-
-                            if pages.len() == page_count {
-                                pages.push(RenderedPage::new(&doc, pages.len() as i32).unwrap());
-                            }
-
-                            let page = &pages[page_count];
-                            let winsize = window.inner_size();
-                            state.highlight_links(page).unwrap();
-                            state.highlight_blocks(page).unwrap();
-                            state.create_texture(
-                                &page.pixmap,
-                                winsize.width,
-                                winsize.height,
-                                false,
-                                false,
-                            );
+                            state.navigate_to(&doc, state.page_count + 1).unwrap();
                         }
-                        VirtualKeyCode::B => {
-                            state.render_blocks = !state.render_blocks;
-                        }
-                        VirtualKeyCode::L => {
-                            state.render_lines = !state.render_lines;
+                        VirtualKeyCode::D => {
+                            state.show_debug = !state.show_debug;
                         }
                         _ => {}
                     },
@@ -1212,18 +1349,6 @@ fn run() {
         }
         Event::RedrawRequested(window_id) if window_id == window.id() => {
             let winsize = window.inner_size();
-            if (winsize.width).abs_diff(pages[page_count].pixmap.width()) >= 1 {
-                let page_width = pages[page_count].page.bounds().unwrap().width();
-                let new_scale_factor = winsize.width as f32 / page_width;
-                pages[page_count].rerender(new_scale_factor as f32).unwrap();
-                state.create_texture(
-                    &pages[page_count].pixmap,
-                    winsize.width,
-                    winsize.height,
-                    true,
-                    false,
-                );
-            }
 
             let mut output = ctx.run(egui_state.take_egui_input(&window), |ctx| {
                 egui::TopBottomPanel::bottom("bottom_panel").show(&ctx, |ui| {
@@ -1232,7 +1357,7 @@ fn run() {
                         ui.label(
                             egui::RichText::new(format!(
                                 "{}/{}",
-                                page_count + 1,
+                                state.page_count + 1,
                                 doc.page_count().unwrap()
                             ))
                             .size(20.),
@@ -1257,6 +1382,12 @@ fn run() {
                         });
                     });
                 });
+                if state.show_debug {
+                    egui::Window::new("debug_win").show(&ctx, |ui| {
+                        ui.checkbox(&mut state.render_lines, "Render lines");
+                        ui.checkbox(&mut state.render_blocks, "Render blocks");
+                    });
+                }
             });
             if let Some(cursor) = cursor {
                 if !ctx.is_pointer_over_area() {
@@ -1269,14 +1400,7 @@ fn run() {
             let textures = output.textures_delta;
 
             state.resize(winsize);
-            state.update(
-                x,
-                y,
-                pages[page_count].pixmap.width(),
-                pages[page_count].pixmap.height(),
-                winsize.width,
-                winsize.height,
-            );
+            state.update(&doc).unwrap();
 
             match state.render(&mut rp, primitives, textures) {
                 Ok(_) => {}
