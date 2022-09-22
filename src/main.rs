@@ -31,6 +31,8 @@ impl Vertex {
 
 #[derive(Debug)]
 struct QuadRenderer {
+    x: f32,
+    y: f32,
     texture_width: u32,
     texture_height: u32,
     quad_width: u32,
@@ -41,12 +43,22 @@ struct QuadRenderer {
 impl QuadRenderer {
     pub fn update(
         &mut self,
+        x: f32,
+        y: f32,
         texture_width: u32,
         texture_height: u32,
         quad_width: u32,
         quad_height: u32,
     ) -> bool {
         let mut changed = self.changed;
+        if x != self.x {
+            self.x = x;
+            changed = true;
+        }
+        if y != self.y {
+            self.y = y;
+            changed = true;
+        }
         if texture_width != self.texture_width {
             self.texture_width = texture_width;
             changed = true;
@@ -68,6 +80,39 @@ impl QuadRenderer {
         return changed;
     }
 
+    /// Transforms coordinates from the texture in [0, 1]
+    /// to the screen/quad coordinates frame in [0, 1].
+    pub fn from_texture(&self, x: f32, y: f32) -> Point {
+        let quad_x = self.x as f32 + x * self.texture_width as f32;
+        let quad_y = self.y as f32 + y * self.texture_height as f32;
+
+        Point {
+            x: quad_x / self.quad_width as f32,
+            y: quad_y / self.quad_height as f32,
+        }
+    }
+
+    /// Transforms from the absolute screen/quad space [0, w/h]
+    /// to relative quad space.
+    pub fn from_abs_quad(&self, x: f32, y: f32) -> Point {
+        Point {
+            x: x / self.quad_width as f32,
+            y: y / self.quad_height as f32,
+        }
+    }
+
+    /// Transforms coordinates from the quad on the screen in [0, 1]
+    /// to the texture coordinates frame in [0, 1].
+    pub fn from_quad(&self, x: f32, y: f32) -> Point {
+        let text_x = x * self.quad_width as f32 - self.x as f32;
+        let text_y = y * self.quad_height as f32 - self.y as f32;
+
+        Point {
+            x: text_x / self.texture_width as f32,
+            y: text_y / self.texture_height as f32,
+        }
+    }
+
     pub fn get_vertices(&self) -> [Vertex; 4] {
         //
         // position coordinates   texture coordinates
@@ -83,27 +128,24 @@ impl QuadRenderer {
         //          v             v
         //  D      -1       C     1
         //
-        let texture_ratio = self.texture_height as f32 / self.texture_width as f32;
-        let quad_ratio = self.quad_height as f32 / self.quad_width as f32;
-
-        let texture_crop = texture_ratio / quad_ratio;
-        let quad_y = 1.0 - 2.0 * texture_crop;
+        let (x0, y0) = self.from_texture(0., 0.).to_vertex_space();
+        let (x1, y1) = self.from_texture(1., 1.).to_vertex_space();
 
         return [
             Vertex {
-                position: [-1.0, 1.0, 0.0],
+                position: [x0, y0, 0.0],
                 tex_coords: [0.0, 0.0],
             }, // A
             Vertex {
-                position: [1.0, 1.0, 0.0],
+                position: [x1, y0, 0.0],
                 tex_coords: [1.0, 0.0],
             }, // B
             Vertex {
-                position: [1.0, quad_y, 0.0],
+                position: [x1, y1, 0.0],
                 tex_coords: [1.0, 1.0],
             }, // C
             Vertex {
-                position: [-1.0, quad_y, 0.0],
+                position: [x0, y1, 0.0],
                 tex_coords: [0.0, 1.0],
             }, // D
         ];
@@ -154,22 +196,11 @@ impl Default for Quad {
 }
 
 impl Quad {
-    pub fn get_vertices(&self, tw: u32, th: u32, qw: u32, qh: u32) -> [QuadVertex; 4] {
-        fn texture_vertex_point(x: f32, y: f32) -> (f32, f32) {
-            let x = 2.0 * x - 1.0;
-            let y = 1.0 - 2.0 * y;
-            (x, y)
-        }
-
-        let tr = th as f32 / tw as f32;
-        let qr = qh as f32 / qw as f32;
-        let v_scale = tr / qr;
-
-        let y0 = self.y * v_scale;
-        let y1 = (self.y + self.height) * v_scale;
-
-        let (x0, y0) = texture_vertex_point(self.x, y0);
-        let (x1, y1) = texture_vertex_point(self.x + self.width, y1);
+    pub fn get_vertices(&self, renderer: &QuadRenderer) -> [QuadVertex; 4] {
+        let (x0, y0) = renderer.from_texture(self.x, self.y).to_vertex_space();
+        let (x1, y1) = renderer
+            .from_texture(self.x + self.width, self.y + self.height)
+            .to_vertex_space();
 
         [
             QuadVertex { position: [x0, y0] }, // A
@@ -268,10 +299,7 @@ impl BlocksRenderPipeline {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         render_pass: &'b mut wgpu::RenderPass<'a>,
-        tw: u32,
-        th: u32,
-        qw: u32,
-        qh: u32,
+        renderer: &QuadRenderer,
     ) {
         render_pass.set_pipeline(&self.render_pipeline);
 
@@ -279,7 +307,7 @@ impl BlocksRenderPipeline {
         let vertices: Vec<QuadVertex> = self
             .quads
             .iter()
-            .map(|q| q.get_vertices(tw, th, qw, qh))
+            .map(|q| q.get_vertices(renderer))
             .flatten()
             .collect();
         let indices: Vec<u16> = (0..4 * self.quads.len())
@@ -310,31 +338,14 @@ impl BlocksRenderPipeline {
         render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
     }
 
-    fn find_hovering<I, T>(
-        &self,
-        it: I,
-        pos: winit::dpi::PhysicalPosition<f64>,
-
-        tw: u32,
-        th: u32,
-        qw: u32,
-        qh: u32,
-    ) -> Option<T>
+    fn find_hovering<I, T>(&self, it: I, point: Point) -> Option<T>
     where
         I: Iterator<Item = T>,
     {
         let quads = &self.quads;
 
-        // Screen space
-        let x = pos.x as f32 / qw as f32;
-        let y = pos.y as f32 / qh as f32;
-
-        let tr = th as f32 / tw as f32;
-        let qr = qh as f32 / qw as f32;
-        let v_scale = qr / tr;
-
-        // Texture space
-        let y = y * v_scale;
+        let x = point.x;
+        let y = point.y;
 
         for (item, quad) in std::iter::zip(it, quads) {
             if quad.x < x && x < quad.x + quad.width && quad.y < y && y < quad.y + quad.height {
@@ -345,17 +356,8 @@ impl BlocksRenderPipeline {
         None
     }
 
-    fn hovers_quad(
-        &self,
-        pos: winit::dpi::PhysicalPosition<f64>,
-        tw: u32,
-        th: u32,
-        qw: u32,
-        qh: u32,
-    ) -> bool {
-        return self
-            .find_hovering(std::iter::repeat(()), pos, tw, th, qw, qh)
-            .is_some();
+    fn hovers_quad(&self, point: Point) -> bool {
+        return self.find_hovering(std::iter::repeat(()), point).is_some();
     }
 
     fn clear_blocks(&mut self) {
@@ -375,6 +377,12 @@ struct Point {
 impl Point {
     fn contained_in(&self, quad: mupdf::Quad) -> bool {
         quad.ul.x < self.x && quad.ul.y < self.y && quad.lr.x > self.x && quad.lr.y > self.y
+    }
+
+    fn to_vertex_space(&self) -> (f32, f32) {
+        let x = 2.0 * self.x - 1.0;
+        let y = 1.0 - 2.0 * self.y;
+        (x, y)
     }
 }
 
@@ -462,13 +470,10 @@ impl TextHighlighter {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         render_pass: &'b mut wgpu::RenderPass<'a>,
-        tw: u32,
-        th: u32,
-        qw: u32,
-        qh: u32,
+        renderer: &QuadRenderer,
     ) {
         self.block_render_pipeline
-            .render(device, queue, render_pass, tw, th, qw, qh);
+            .render(device, queue, render_pass, renderer);
     }
 }
 
@@ -485,77 +490,11 @@ struct PageRenderPipeline {
 }
 
 impl PageRenderPipeline {
-    pub fn render<'a, 'b>(
-        &'a mut self,
-        queue: &wgpu::Queue,
-        render_pass: &'b mut wgpu::RenderPass<'a>,
-    ) {
-        render_pass.set_pipeline(&self.render_pipeline);
-        render_pass.set_bind_group(0, &self.bind_group.as_ref().unwrap(), &[]);
-
-        if self.renderer.changed {
-            let vertices = self.renderer.get_vertices();
-            queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&vertices));
-            self.renderer.changed = false;
-        }
-
-        render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        render_pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
-    }
-}
-
-struct State {
-    surface: wgpu::Surface,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
-    size: winit::dpi::PhysicalSize<u32>,
-
-    page_render_pipeline: PageRenderPipeline,
-    block_render_pipeline: BlocksRenderPipeline,
-    line_render_pipeline: BlocksRenderPipeline,
-    link_render_pipeline: BlocksRenderPipeline,
-
-    render_blocks: bool,
-    render_lines: bool,
-}
-
-impl State {
-    async fn new(window: &Window) -> Self {
-        let size = window.inner_size();
-
-        let instance = wgpu::Instance::new(wgpu::Backends::all());
-        let surface = unsafe { instance.create_surface(window) };
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::default(),
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })
-            .await
-            .unwrap();
-        let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    features: wgpu::Features::empty(),
-                    limits: wgpu::Limits::default(),
-                    label: Some("device"),
-                },
-                None,
-            )
-            .await
-            .unwrap();
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: surface.get_supported_formats(&adapter)[0],
-            width: size.width,
-            height: size.height,
-            present_mode: wgpu::PresentMode::Fifo,
-        };
-        surface.configure(&device, &config);
-
-        let shader = device.create_shader_module(include_wgsl!("shader.wgsl"));
+    pub fn new(
+        device: &wgpu::Device,
+        config: &wgpu::SurfaceConfiguration,
+        shader: &wgpu::ShaderModule,
+    ) -> Self {
         let texture_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[
@@ -637,7 +576,6 @@ impl State {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        let winsize = window.inner_size();
         let page_render_pipeline = PageRenderPipeline {
             texture: None,
             render_pipeline,
@@ -647,18 +585,182 @@ impl State {
             bind_group_layout: texture_bind_group_layout,
             bind_group: None,
 
+            // TODO: Impl default::Default()
             renderer: QuadRenderer {
+                x: 0.,
+                y: 0.,
                 texture_width: 0,
                 texture_height: 0,
-                quad_width: winsize.width,
-                quad_height: winsize.height,
+                quad_width: 0,
+                quad_height: 0,
                 changed: true,
             },
         };
 
+        return page_render_pipeline;
+    }
+
+    pub fn create_texture(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pixmap: &mupdf::Pixmap,
+        winwidth: u32,
+        winheight: u32,
+        force: bool,
+    ) {
+        let texture_size = wgpu::Extent3d {
+            width: pixmap.width(),
+            height: pixmap.height(),
+            depth_or_array_layers: 1,
+        };
+        if self.texture.is_none() || force {
+            self.texture = Some(device.create_texture(&wgpu::TextureDescriptor {
+                size: texture_size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                label: Some("Pixmap Texture"),
+            }));
+            self.renderer
+                .update(0., 0., pixmap.width(), pixmap.height(), winwidth, winheight);
+        }
+
+        let diffuse_texture = self.texture.as_ref().unwrap();
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: diffuse_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            pixmap.samples(),
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: std::num::NonZeroU32::new(4 * pixmap.width()),
+                rows_per_image: std::num::NonZeroU32::new(pixmap.height()),
+            },
+            texture_size,
+        );
+
+        if self.bind_group.is_none() || force {
+            let diffuse_texture_view =
+                diffuse_texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let diffuse_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                address_mode_w: wgpu::AddressMode::ClampToEdge,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Nearest,
+                mipmap_filter: wgpu::FilterMode::Nearest,
+                ..Default::default()
+            });
+
+            let diffuse_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                layout: &self.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&diffuse_texture_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&diffuse_sampler),
+                    },
+                ],
+                label: Some("Pixmap Texture Bind Group"),
+            });
+
+            self.bind_group = Some(diffuse_bind_group);
+        }
+    }
+    pub fn render<'a, 'b>(
+        &'a self,
+        queue: &wgpu::Queue,
+        render_pass: &'b mut wgpu::RenderPass<'a>,
+    ) {
+        render_pass.set_pipeline(&self.render_pipeline);
+        render_pass.set_bind_group(0, &self.bind_group.as_ref().unwrap(), &[]);
+
+        if self.renderer.changed {
+            let vertices = self.renderer.get_vertices();
+            queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+        }
+
+        render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        render_pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+    }
+
+    fn from_pos_to_page(&self, pos: winit::dpi::PhysicalPosition<f64>) -> Point {
+        let point = self.renderer.from_abs_quad(pos.x as f32, pos.y as f32);
+        return self.renderer.from_quad(point.x, point.y);
+    }
+}
+
+struct State {
+    surface: wgpu::Surface,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    config: wgpu::SurfaceConfiguration,
+    size: winit::dpi::PhysicalSize<u32>,
+
+    page_render_pipeline: PageRenderPipeline,
+    page_render_pipeline2: PageRenderPipeline,
+
+    // TODO: Should be in the page
+    block_render_pipeline: BlocksRenderPipeline,
+    line_render_pipeline: BlocksRenderPipeline,
+    link_render_pipeline: BlocksRenderPipeline,
+
+    render_blocks: bool,
+    render_lines: bool,
+}
+
+impl State {
+    async fn new(window: &Window) -> Self {
+        let size = window.inner_size();
+
+        let instance = wgpu::Instance::new(wgpu::Backends::all());
+        let surface = unsafe { instance.create_surface(window) };
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::default(),
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+            })
+            .await
+            .unwrap();
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    features: wgpu::Features::empty(),
+                    limits: wgpu::Limits::default(),
+                    label: Some("device"),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: surface.get_supported_formats(&adapter)[0],
+            width: size.width,
+            height: size.height,
+            present_mode: wgpu::PresentMode::Fifo,
+        };
+        surface.configure(&device, &config);
+
+        let shader = device.create_shader_module(include_wgsl!("shader.wgsl"));
+
         let block_render_pipeline = BlocksRenderPipeline::new(&device, 10, &config, &shader);
         let line_render_pipeline = BlocksRenderPipeline::new(&device, 10, &config, &shader);
         let link_render_pipeline = BlocksRenderPipeline::new(&device, 10, &config, &shader);
+
+        let page_render_pipeline = PageRenderPipeline::new(&device, &config, &shader);
+        let page_render_pipeline2 = PageRenderPipeline::new(&device, &config, &shader);
 
         Self {
             surface,
@@ -668,6 +770,8 @@ impl State {
             size,
 
             page_render_pipeline,
+            page_render_pipeline2,
+
             block_render_pipeline,
             line_render_pipeline,
             link_render_pipeline,
@@ -686,8 +790,26 @@ impl State {
         }
     }
 
-    fn update(&mut self, texture_width: u32, texture_height: u32, winwidth: u32, winheight: u32) {
+    fn update(
+        &mut self,
+        x: f32,
+        y: f32,
+        texture_width: u32,
+        texture_height: u32,
+        winwidth: u32,
+        winheight: u32,
+    ) {
         self.page_render_pipeline.renderer.update(
+            x,
+            y,
+            texture_width,
+            texture_height,
+            winwidth,
+            winheight,
+        );
+        self.page_render_pipeline2.renderer.update(
+            x,
+            y + texture_height as f32,
             texture_width,
             texture_height,
             winwidth,
@@ -745,20 +867,16 @@ impl State {
                 depth_stencil_attachment: None,
             });
 
-            let texture_width = self.page_render_pipeline.renderer.texture_width;
-            let texture_height = self.page_render_pipeline.renderer.texture_height;
-
             self.page_render_pipeline
+                .render(&self.queue, &mut render_pass);
+            self.page_render_pipeline2
                 .render(&self.queue, &mut render_pass);
             if self.render_blocks {
                 self.block_render_pipeline.render(
                     &self.device,
                     &self.queue,
                     &mut render_pass,
-                    texture_width,
-                    texture_height,
-                    quad_width,
-                    quad_height,
+                    &self.page_render_pipeline.renderer,
                 );
             }
             if self.render_lines {
@@ -766,20 +884,14 @@ impl State {
                     &self.device,
                     &self.queue,
                     &mut render_pass,
-                    texture_width,
-                    texture_height,
-                    quad_width,
-                    quad_height,
+                    &self.page_render_pipeline.renderer,
                 );
             }
             self.link_render_pipeline.render(
                 &self.device,
                 &self.queue,
                 &mut render_pass,
-                texture_width,
-                texture_height,
-                quad_width,
-                quad_height,
+                &self.page_render_pipeline.renderer,
             );
 
             rp.execute_with_renderpass(&mut render_pass, &primitives, &descriptor);
@@ -787,6 +899,8 @@ impl State {
 
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
+
+        self.page_render_pipeline.renderer.changed = false;
 
         Ok(())
     }
@@ -839,23 +953,15 @@ impl State {
     }
 
     fn hovers_link(&self, pos: winit::dpi::PhysicalPosition<f64>) -> bool {
-        return self.link_render_pipeline.hovers_quad(
-            pos,
-            self.page_render_pipeline.renderer.texture_width,
-            self.page_render_pipeline.renderer.texture_height,
-            self.page_render_pipeline.renderer.quad_width,
-            self.page_render_pipeline.renderer.quad_height,
-        );
+        return self
+            .link_render_pipeline
+            .hovers_quad(self.page_render_pipeline.from_pos_to_page(pos));
     }
 
     fn hovers_line(&self, pos: winit::dpi::PhysicalPosition<f64>) -> bool {
-        return self.line_render_pipeline.hovers_quad(
-            pos,
-            self.page_render_pipeline.renderer.texture_width,
-            self.page_render_pipeline.renderer.texture_height,
-            self.page_render_pipeline.renderer.quad_width,
-            self.page_render_pipeline.renderer.quad_height,
-        );
+        return self
+            .line_render_pipeline
+            .hovers_quad(self.page_render_pipeline.from_pos_to_page(pos));
     }
 
     fn create_texture(
@@ -864,77 +970,26 @@ impl State {
         winwidth: u32,
         winheight: u32,
         force: bool,
+        first: bool,
     ) {
-        let texture_size = wgpu::Extent3d {
-            width: pixmap.width(),
-            height: pixmap.height(),
-            depth_or_array_layers: 1,
-        };
-        if self.page_render_pipeline.texture.is_none() || force {
-            self.page_render_pipeline.texture =
-                Some(self.device.create_texture(&wgpu::TextureDescriptor {
-                    size: texture_size,
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rgba8Unorm,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                    label: Some("Pixmap Texture"),
-                }));
-            self.page_render_pipeline.renderer.update(
-                pixmap.width(),
-                pixmap.height(),
+        if first {
+            self.page_render_pipeline.create_texture(
+                &self.device,
+                &self.queue,
+                pixmap,
                 winwidth,
                 winheight,
+                force,
             );
-        }
-
-        let diffuse_texture = self.page_render_pipeline.texture.as_ref().unwrap();
-        self.queue.write_texture(
-            wgpu::ImageCopyTexture {
-                texture: diffuse_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            pixmap.samples(),
-            wgpu::ImageDataLayout {
-                offset: 0,
-                bytes_per_row: std::num::NonZeroU32::new(4 * pixmap.width()),
-                rows_per_image: std::num::NonZeroU32::new(pixmap.height()),
-            },
-            texture_size,
-        );
-
-        if self.page_render_pipeline.bind_group.is_none() || force {
-            let diffuse_texture_view =
-                diffuse_texture.create_view(&wgpu::TextureViewDescriptor::default());
-            let diffuse_sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
-                address_mode_u: wgpu::AddressMode::ClampToEdge,
-                address_mode_v: wgpu::AddressMode::ClampToEdge,
-                address_mode_w: wgpu::AddressMode::ClampToEdge,
-                mag_filter: wgpu::FilterMode::Linear,
-                min_filter: wgpu::FilterMode::Nearest,
-                mipmap_filter: wgpu::FilterMode::Nearest,
-                ..Default::default()
-            });
-
-            let diffuse_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                layout: &self.page_render_pipeline.bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&diffuse_texture_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&diffuse_sampler),
-                    },
-                ],
-                label: Some("Pixmap Texture Bind Group"),
-            });
-
-            self.page_render_pipeline.bind_group = Some(diffuse_bind_group);
+        } else {
+            self.page_render_pipeline2.create_texture(
+                &self.device,
+                &self.queue,
+                pixmap,
+                winwidth,
+                winheight,
+                force,
+            );
         }
     }
 }
@@ -994,7 +1049,7 @@ fn run() {
     ctx.set_text_aa_level(8);
 
     let mut pages = vec![RenderedPage::new(&doc, 0).unwrap()];
-    if page_count > 1 {
+    if total_page_count > 1 {
         pages.push(RenderedPage::new(&doc, 1).unwrap());
     }
     let page = &mut pages[page_count];
@@ -1018,7 +1073,10 @@ fn run() {
     page.rerender(scale_factor as f32).unwrap();
 
     let winsize = window.inner_size();
-    state.create_texture(&page.pixmap, winsize.width, winsize.height, false);
+    state.create_texture(&page.pixmap, winsize.width, winsize.height, false, true);
+
+    let page2 = &pages[1];
+    state.create_texture(&page2.pixmap, winsize.width, winsize.height, false, false);
 
     let mut egui_state = egui_winit::State::new(&event_loop);
     let mut ctx = egui::Context::default();
@@ -1027,6 +1085,9 @@ fn run() {
 
     let mut cursor: Option<egui::CursorIcon> = None;
     let mut cursor_position = winit::dpi::PhysicalPosition { x: 0., y: 0. };
+
+    let mut x = 0.;
+    let mut y = 0.;
 
     event_loop.run(move |event, _, control_flow| match event {
         Event::WindowEvent {
@@ -1055,18 +1116,22 @@ fn run() {
                             },
                         ..
                     } => *control_flow = ControlFlow::Exit,
+                    WindowEvent::MouseWheel {
+                        delta: winit::event::MouseScrollDelta::LineDelta(xd, yd),
+                        ..
+                    } => {
+                        x += xd * 10.;
+                        y += yd * 10.;
+                    }
                     WindowEvent::MouseInput {
                         state: winit::event::ElementState::Pressed,
                         ..
                     } => {
-                        if let Some(link) = state.link_render_pipeline.find_hovering(
-                            pages[page_count].page.links().unwrap(),
-                            cursor_position,
-                            state.page_render_pipeline.renderer.texture_width,
-                            state.page_render_pipeline.renderer.texture_height,
-                            state.page_render_pipeline.renderer.quad_width,
-                            state.page_render_pipeline.renderer.quad_height,
-                        ) {
+                        let point = state.page_render_pipeline.from_pos_to_page(cursor_position);
+                        if let Some(link) = state
+                            .link_render_pipeline
+                            .find_hovering(pages[page_count].page.links().unwrap(), point)
+                        {
                             if let Some(uri) = link.uri.strip_prefix("#page=") {
                                 if let Some((page_number, _)) = uri.split_once('&') {
                                     let page_number =
@@ -1105,6 +1170,7 @@ fn run() {
                                 winsize.width,
                                 winsize.height,
                                 false,
+                                false,
                             );
                         }
                         VirtualKeyCode::Right => {
@@ -1122,6 +1188,7 @@ fn run() {
                                 &page.pixmap,
                                 winsize.width,
                                 winsize.height,
+                                false,
                                 false,
                             );
                         }
@@ -1154,6 +1221,7 @@ fn run() {
                     winsize.width,
                     winsize.height,
                     true,
+                    false,
                 );
             }
 
@@ -1202,6 +1270,8 @@ fn run() {
 
             state.resize(winsize);
             state.update(
+                x,
+                y,
                 pages[page_count].pixmap.width(),
                 pages[page_count].pixmap.height(),
                 winsize.width,
