@@ -376,6 +376,7 @@ impl TextHighlighter {
         }
         let mut state = SelectState::SeekStart;
 
+        /*
         match (self.head.as_ref(), self.anchor.as_ref()) {
             (Some(head), Some(anchor)) => {
                 for block in self.text_page.blocks() {
@@ -405,6 +406,7 @@ impl TextHighlighter {
             }
             _ => {}
         };
+        */
     }
 
     fn render<'a, 'b>(
@@ -969,7 +971,7 @@ fn run() {
     let mut egui_state = egui_winit::State::new(&event_loop);
     let mut ctx = egui::Context::default();
     let mut rp =
-        egui_wgpu::renderer::RenderPass::new(&state.device, wgpu::TextureFormat::Bgra8UnormSrgb, 1);
+        egui_wgpu::renderer::RenderPass::new(&state.device, wgpu::TextureFormat::Rgba8UnormSrgb, 1);
 
     // for block in page.textpage.blocks() {
     //     for line in block.lines() {
@@ -1080,7 +1082,7 @@ fn run() {
         }
         Event::RedrawRequested(window_id) if window_id == window.id() => {
             let winsize = window.inner_size();
-            if (winsize.width).abs_diff(pages[page_count].pixmap.width()) > 2 {
+            if (winsize.width).abs_diff(pages[page_count].pixmap.width()) >= 1 {
                 let page_width = pages[page_count].page.bounds().unwrap().width();
                 let new_scale_factor = winsize.width as f32 / page_width;
                 pages[page_count].rerender(new_scale_factor as f32).unwrap();
@@ -1093,23 +1095,30 @@ fn run() {
             }
 
             let mut output = ctx.run(egui_state.take_egui_input(&window), |ctx| {
-                egui::TopBottomPanel::bottom("bottom_panel")
-                    .show(&ctx, |ui| {
-                        ui.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(egui::RichText::new(format!(
+                egui::TopBottomPanel::bottom("bottom_panel").show(&ctx, |ui| {
+                    ui.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
                                 "{}/{}",
                                 page_count + 1,
                                 doc.page_count().unwrap()
-                            )).size(20.));
-                            ui.centered_and_justified(|ui| {
-                                ui.add(egui::Label::new(egui::RichText::new(&filename).size(20.)).wrap(false));
-                            });
+                            ))
+                            .size(20.),
+                        );
+                        ui.centered_and_justified(|ui| {
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(&filename).size(20.))
+                                    .wrap(false),
+                            );
                         });
                     });
+                });
             });
-            if let Some(cursor) = cursor && !ctx.is_pointer_over_area() {
-                output.platform_output.cursor_icon = cursor;
+            if let Some(cursor) = cursor {
+                if !ctx.is_pointer_over_area() {
+                    output.platform_output.cursor_icon = cursor;
+                }
             }
             egui_state.handle_platform_output(&window, &ctx, output.platform_output);
 
