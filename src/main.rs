@@ -310,6 +310,54 @@ impl BlocksRenderPipeline {
         render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
     }
 
+    fn find_hovering<I, T>(
+        &self,
+        it: I,
+        pos: winit::dpi::PhysicalPosition<f64>,
+
+        tw: u32,
+        th: u32,
+        qw: u32,
+        qh: u32,
+    ) -> Option<T>
+    where
+        I: Iterator<Item = T>,
+    {
+        let quads = &self.quads;
+
+        // Screen space
+        let x = pos.x as f32 / qw as f32;
+        let y = pos.y as f32 / qh as f32;
+
+        let tr = th as f32 / tw as f32;
+        let qr = qh as f32 / qw as f32;
+        let v_scale = qr / tr;
+
+        // Texture space
+        let y = y * v_scale;
+
+        for (item, quad) in std::iter::zip(it, quads) {
+            if quad.x < x && x < quad.x + quad.width && quad.y < y && y < quad.y + quad.height {
+                return Some(item);
+            }
+        }
+
+        None
+    }
+
+    fn hovers_quad(
+        &self,
+        pos: winit::dpi::PhysicalPosition<f64>,
+        tw: u32,
+        th: u32,
+        qw: u32,
+        qh: u32,
+    ) -> bool {
+        return self
+            .find_hovering(std::iter::repeat(()), pos, tw, th, qw, qh)
+            .is_some();
+    }
+
     fn clear_blocks(&mut self) {
         self.quads.clear();
     }
@@ -467,11 +515,10 @@ struct State {
     page_render_pipeline: PageRenderPipeline,
     block_render_pipeline: BlocksRenderPipeline,
     line_render_pipeline: BlocksRenderPipeline,
+    link_render_pipeline: BlocksRenderPipeline,
 
     render_blocks: bool,
     render_lines: bool,
-
-    color_r: f64,
 }
 
 impl State {
@@ -611,6 +658,7 @@ impl State {
 
         let block_render_pipeline = BlocksRenderPipeline::new(&device, 10, &config, &shader);
         let line_render_pipeline = BlocksRenderPipeline::new(&device, 10, &config, &shader);
+        let link_render_pipeline = BlocksRenderPipeline::new(&device, 10, &config, &shader);
 
         Self {
             surface,
@@ -622,11 +670,10 @@ impl State {
             page_render_pipeline,
             block_render_pipeline,
             line_render_pipeline,
+            link_render_pipeline,
 
             render_blocks: false,
             render_lines: false,
-
-            color_r: 0.3,
         }
     }
 
@@ -636,16 +683,6 @@ impl State {
             self.config.width = new_size.width;
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
-        }
-    }
-
-    fn input(&mut self, event: &WindowEvent) -> bool {
-        match event {
-            WindowEvent::CursorMoved { position, .. } => {
-                self.color_r = position.y as f64 / self.size.height as f64;
-                false
-            }
-            _ => false,
         }
     }
 
@@ -735,6 +772,15 @@ impl State {
                     quad_height,
                 );
             }
+            self.link_render_pipeline.render(
+                &self.device,
+                &self.queue,
+                &mut render_pass,
+                texture_width,
+                texture_height,
+                quad_width,
+                quad_height,
+            );
 
             rp.execute_with_renderpass(&mut render_pass, &primitives, &descriptor);
         }
@@ -745,7 +791,7 @@ impl State {
         Ok(())
     }
 
-    fn highlight_first_blocks(&mut self, page: &RenderedPage) -> Result<(), mupdf::Error> {
+    fn highlight_blocks(&mut self, page: &RenderedPage) -> Result<(), mupdf::Error> {
         self.block_render_pipeline.clear_blocks();
         self.line_render_pipeline.clear_blocks();
 
@@ -775,32 +821,41 @@ impl State {
         Ok(())
     }
 
-    fn hovers_line(&self, pos: winit::dpi::PhysicalPosition<f64>) -> bool {
-        let quads = &self.line_render_pipeline.quads;
+    fn highlight_links(&mut self, page: &RenderedPage) -> Result<(), mupdf::Error> {
+        self.link_render_pipeline.clear_blocks();
 
-        let tw = self.page_render_pipeline.renderer.texture_width;
-        let th = self.page_render_pipeline.renderer.texture_height;
-        let qw = self.page_render_pipeline.renderer.quad_width;
-        let qh = self.page_render_pipeline.renderer.quad_height;
-
-        // Screen space
-        let x = pos.x as f32 / qw as f32;
-        let y = pos.y as f32 / qh as f32;
-
-        let tr = th as f32 / tw as f32;
-        let qr = qh as f32 / qw as f32;
-        let v_scale = qr / tr;
-
-        // Texture space
-        let y = y * v_scale;
-
-        for quad in quads {
-            if quad.x < x && x < quad.x + quad.width && quad.y < y && y < quad.y + quad.height {
-                return true;
-            }
+        let page_bounds = page.page.bounds()?;
+        for link in page.page.links()? {
+            let rect = link.bounds;
+            self.link_render_pipeline.add_block(Quad {
+                x: rect.x0 / page_bounds.width(),
+                y: rect.y0 / page_bounds.height(),
+                width: (rect.x1 - rect.x0) / page_bounds.width(),
+                height: (rect.y1 - rect.y0) / page_bounds.height(),
+            });
         }
 
-        false
+        Ok(())
+    }
+
+    fn hovers_link(&self, pos: winit::dpi::PhysicalPosition<f64>) -> bool {
+        return self.link_render_pipeline.hovers_quad(
+            pos,
+            self.page_render_pipeline.renderer.texture_width,
+            self.page_render_pipeline.renderer.texture_height,
+            self.page_render_pipeline.renderer.quad_width,
+            self.page_render_pipeline.renderer.quad_height,
+        );
+    }
+
+    fn hovers_line(&self, pos: winit::dpi::PhysicalPosition<f64>) -> bool {
+        return self.line_render_pipeline.hovers_quad(
+            pos,
+            self.page_render_pipeline.renderer.texture_width,
+            self.page_render_pipeline.renderer.texture_height,
+            self.page_render_pipeline.renderer.quad_width,
+            self.page_render_pipeline.renderer.quad_height,
+        );
     }
 
     fn create_texture(
@@ -956,7 +1011,8 @@ fn run() {
         .unwrap();
 
     let mut state = pollster::block_on(State::new(&window));
-    state.highlight_first_blocks(page).unwrap();
+    state.highlight_links(page).unwrap();
+    state.highlight_blocks(page).unwrap();
 
     let scale_factor = window.scale_factor();
     page.rerender(scale_factor as f32).unwrap();
@@ -970,6 +1026,7 @@ fn run() {
         egui_wgpu::renderer::RenderPass::new(&state.device, wgpu::TextureFormat::Rgba8UnormSrgb, 1);
 
     let mut cursor: Option<egui::CursorIcon> = None;
+    let mut cursor_position = winit::dpi::PhysicalPosition { x: 0., y: 0. };
 
     event_loop.run(move |event, _, control_flow| match event {
         Event::WindowEvent {
@@ -979,11 +1036,14 @@ fn run() {
             if !egui_state.on_event(&mut ctx, &event) {
                 match event {
                     WindowEvent::CursorMoved { position, .. } => {
-                        if state.hovers_line(*position) {
+                        if state.hovers_link(*position) {
+                            cursor = Some(egui::CursorIcon::PointingHand);
+                        } else if state.hovers_line(*position) {
                             cursor = Some(egui::CursorIcon::Text);
                         } else {
                             cursor = None;
                         }
+                        cursor_position = *position;
                     }
                     WindowEvent::CloseRequested
                     | WindowEvent::KeyboardInput {
@@ -995,6 +1055,22 @@ fn run() {
                             },
                         ..
                     } => *control_flow = ControlFlow::Exit,
+                    WindowEvent::MouseInput {
+                        state: winit::event::ElementState::Pressed,
+                        ..
+                    } => {
+                        if let Some(link) = state.link_render_pipeline.find_hovering(
+                            pages[page_count].page.links().unwrap(),
+                            cursor_position,
+                            state.page_render_pipeline.renderer.texture_width,
+                            state.page_render_pipeline.renderer.texture_height,
+                            state.page_render_pipeline.renderer.quad_width,
+                            state.page_render_pipeline.renderer.quad_height,
+                        ) {
+                            // TODO: navigate to the page
+                            println!("{:?}", link.uri);
+                        }
+                    }
                     WindowEvent::KeyboardInput {
                         input:
                             KeyboardInput {
@@ -1015,7 +1091,7 @@ fn run() {
 
                             let page = &pages[page_count];
                             let winsize = window.inner_size();
-                            state.highlight_first_blocks(page).unwrap();
+                            state.highlight_blocks(page).unwrap();
                             state.create_texture(
                                 &page.pixmap,
                                 winsize.width,
@@ -1032,7 +1108,8 @@ fn run() {
 
                             let page = &pages[page_count];
                             let winsize = window.inner_size();
-                            state.highlight_first_blocks(page).unwrap();
+                            state.highlight_links(page).unwrap();
+                            state.highlight_blocks(page).unwrap();
                             state.create_texture(
                                 &page.pixmap,
                                 winsize.width,
