@@ -1069,7 +1069,8 @@ fn run() {
                         ) {
                             if let Some(uri) = link.uri.strip_prefix("#page=") {
                                 if let Some((page_number, _)) = uri.split_once('&') {
-                                    let page_number = usize::from_str_radix(page_number, 10).unwrap();
+                                    let page_number =
+                                        usize::from_str_radix(page_number, 10).unwrap();
                                     page_count = page_number; // Navigate to page
                                 }
                             } else {
@@ -1169,10 +1170,22 @@ fn run() {
                             .size(20.),
                         );
                         ui.centered_and_justified(|ui| {
-                            ui.add(
-                                egui::Label::new(egui::RichText::new(&prettyname).size(20.))
-                                    .wrap(false),
+                            let mut job = egui::text::LayoutJob::single_section(
+                                prettyname.to_owned(),
+                                egui::text::TextFormat::simple(
+                                    egui::FontId {
+                                        size: 20.,
+                                        family: egui::text::FontFamily::Monospace,
+                                    },
+                                    egui::Color32::GRAY,
+                                ),
                             );
+                            job.wrap = egui::epaint::text::TextWrapping {
+                                max_rows: 1,
+                                overflow_character: Some('…'),
+                                ..Default::default()
+                            };
+                            ui.label(job);
                         });
                     });
                 });
