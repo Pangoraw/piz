@@ -656,16 +656,6 @@ impl State {
             winwidth,
             winheight,
         );
-
-        // self.block_render_pipeline.quad.update(winwidth, winheight);
-
-        // self.block_render_pipeline
-        //     .quad
-        //     .resize((self.color_r * 20.0) as u32, (self.color_r * 30.0) as u32);
-
-        // self.block_render_pipeline
-        //     .quad
-        //     .set_position((self.color_r * 100.0) as u32, (self.color_r * 200.0) as u32);
     }
 
     fn render(
@@ -679,7 +669,7 @@ impl State {
 
         let descriptor = egui_wgpu::renderer::ScreenDescriptor {
             size_in_pixels: [quad_width, quad_height],
-            pixels_per_point: 1.0,
+            pixels_per_point: 1.0, // What should go there ? window.scale_factor() ?
         };
 
         for (id, image_delta) in textures.set {
@@ -710,7 +700,7 @@ impl State {
                             r: 0.8,
                             g: 1.0,
                             b: 1.0,
-                            a: 0.0,
+                            a: 1.0,
                         }),
                         store: true,
                     },
@@ -927,11 +917,17 @@ fn run() {
     env_logger::init();
 
     let args: Vec<String> = std::env::args().collect();
+    tracing::debug!("args = {:?}", &args);
+
     let exe_name = &args[0];
     let filename = if args.len() != 2 {
         String::from("/home/paul/Downloads/remotesensing-1853970.pdf")
     } else {
         args.last().take().unwrap().to_string()
+    };
+    let prettyname = {
+        let path = std::path::Path::new(&filename);
+        String::from(path.file_name().unwrap().to_str().unwrap())
     };
 
     let doc = mupdf::Document::open(&filename).unwrap();
@@ -951,7 +947,7 @@ fn run() {
 
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
-        .with_title(format!("{} - {}", filename, exe_name))
+        .with_title(format!("{} - {}", prettyname, exe_name))
         .with_inner_size(winit::dpi::LogicalSize::new(
             bounds.width(),
             bounds.height(),
@@ -973,24 +969,6 @@ fn run() {
     let mut rp =
         egui_wgpu::renderer::RenderPass::new(&state.device, wgpu::TextureFormat::Rgba8UnormSrgb, 1);
 
-    // for block in page.textpage.blocks() {
-    //     for line in block.lines() {
-    //         println!("Rect = {:?}", line.bounds());
-    //         for char in line.chars() {
-    //             print!("{}", char.char().unwrap());
-    //         }
-    //         println!("");
-    //     }
-    // }
-
-    // let page = doc.load_page(page_count).unwrap();
-
-    // let scale = 7.0;
-    // let mat = mupdf::Matrix::new_scale(scale, scale);
-
-    // let pixmap = page
-    //     .to_pixmap(&mat, &Colorspace::device_rgb(), 1., false)
-    //     .unwrap();
     let mut cursor: Option<egui::CursorIcon> = None;
 
     event_loop.run(move |event, _, control_flow| match event {
@@ -1108,7 +1086,7 @@ fn run() {
                         );
                         ui.centered_and_justified(|ui| {
                             ui.add(
-                                egui::Label::new(egui::RichText::new(&filename).size(20.))
+                                egui::Label::new(egui::RichText::new(&prettyname).size(20.))
                                     .wrap(false),
                             );
                         });
@@ -1149,8 +1127,16 @@ fn run() {
 }
 
 fn main() {
+    let home_dir = home::home_dir().unwrap();
+    let log_file = std::fs::File::options()
+        .append(true)
+        .create(true)
+        .open(home_dir.join(".local/share/piz.log"))
+        .unwrap();
+
     let subscriber = tracing_subscriber::FmtSubscriber::builder()
         .with_max_level(tracing::Level::TRACE)
+        .with_writer(std::sync::Arc::new(log_file))
         .finish();
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
