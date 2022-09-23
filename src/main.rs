@@ -165,13 +165,15 @@ const INDICES: &[u16] = &[0, 2, 1, 0, 3, 2];
 #[derive(Clone, Copy, Debug)]
 struct QuadVertex {
     position: [f32; 2],
+    color: [f32; 4],
 }
 
 unsafe impl bytemuck::Pod for QuadVertex {}
 unsafe impl bytemuck::Zeroable for QuadVertex {}
 
 impl QuadVertex {
-    const ATTRIBS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x2];
+    const ATTRIBS: [wgpu::VertexAttribute; 2] =
+        wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4];
 
     fn desc<'a>() -> wgpu::VertexBufferLayout<'a> {
         wgpu::VertexBufferLayout {
@@ -202,17 +204,30 @@ impl Default for Quad {
 }
 
 impl Quad {
-    pub fn get_vertices(&self, renderer: &QuadRenderer) -> [QuadVertex; 4] {
+    pub fn get_vertices(&self, renderer: &QuadRenderer, color: &egui::Rgba) -> [QuadVertex; 4] {
         let (x0, y0) = renderer.from_texture(self.x, self.y).to_vertex_space();
         let (x1, y1) = renderer
             .from_texture(self.x + self.width, self.y + self.height)
             .to_vertex_space();
 
+        let color = [color.r(), color.g(), color.b(), color.a()];
         [
-            QuadVertex { position: [x0, y0] }, // A
-            QuadVertex { position: [x1, y0] }, // B
-            QuadVertex { position: [x1, y1] }, // C
-            QuadVertex { position: [x0, y1] }, // D
+            QuadVertex {
+                position: [x0, y0],
+                color,
+            }, // A
+            QuadVertex {
+                position: [x1, y0],
+                color,
+            }, // B
+            QuadVertex {
+                position: [x1, y1],
+                color,
+            }, // C
+            QuadVertex {
+                position: [x0, y1],
+                color,
+            }, // D
         ]
     }
 }
@@ -225,6 +240,7 @@ struct BlocksRenderPipeline {
     index_buffer: wgpu::Buffer,
 
     quads: Vec<Quad>,
+    normal_color: egui::Rgba,
 }
 
 impl BlocksRenderPipeline {
@@ -297,6 +313,7 @@ impl BlocksRenderPipeline {
             vertex_buffer,
             index_buffer,
             quads,
+            normal_color: egui::Rgba::from_rgba_unmultiplied(0.8, 0.2, 0.3, 0.3),
         }
     }
 
@@ -313,7 +330,7 @@ impl BlocksRenderPipeline {
         let vertices: Vec<QuadVertex> = self
             .quads
             .iter()
-            .map(|q| q.get_vertices(renderer))
+            .map(|q| q.get_vertices(renderer, &self.normal_color))
             .flatten()
             .collect();
         let indices: Vec<u16> = (0..4 * self.quads.len())
@@ -621,6 +638,15 @@ impl PageRenderPipeline {
         return page_render_pipeline;
     }
 
+    /// Returns wether or not part of the rendered texture are visible on the screen.
+    fn is_visible(&self) -> bool {
+        return true;
+
+        self.renderer.y >= 0.
+            && self.renderer.y + self.renderer.texture_height as f32
+                <= self.renderer.quad_height as f32
+    }
+
     fn highlight_blocks(&mut self, page: &RenderedPage) -> Result<(), mupdf::Error> {
         self.block_render_pipeline.clear_blocks();
         self.line_render_pipeline.clear_blocks();
@@ -764,6 +790,10 @@ impl PageRenderPipeline {
         render_blocks: bool,
         render_lines: bool,
     ) {
+        if !self.is_visible() {
+            return;
+        }
+
         render_pass.set_pipeline(&self.render_pipeline);
         render_pass.set_bind_group(0, &self.bind_group.as_ref().unwrap(), &[]);
 
@@ -1155,10 +1185,6 @@ impl State {
         Ok(())
     }
 
-    fn visible_pages<'a>(&'a mut self) -> Vec<&'a Page> {
-        self.pages.iter().collect::<Vec<&Page>>()
-    }
-
     fn create_texture(&mut self, winwidth: u32, winheight: u32, force: bool) {
         for page in self.pages.iter_mut() {
             page.create_texture(&self.device, &self.queue, winwidth, winheight, force);
@@ -1303,9 +1329,10 @@ fn run() {
                             if let Some(uri) = link.uri.strip_prefix("#page=") {
                                 if let Some((page_number, _)) = uri.split_once('&') {
                                     let page_number =
-                                        usize::from_str_radix(page_number, 10).unwrap();
-                                    state.navigate_to(&doc, page_number).unwrap();
-                                    // Navigate to page
+                                        usize::from_str_radix(page_number, 10).unwrap() - 1;
+                                    if page_number < doc.page_count().unwrap() as usize {
+                                        state.navigate_to(&doc, page_number).unwrap();
+                                    }
                                 }
                             } else {
                                 dbg!(&link.uri);
@@ -1394,6 +1421,15 @@ fn run() {
                     egui::Window::new("debug_win").show(&ctx, |ui| {
                         ui.checkbox(&mut state.render_lines, "Render lines");
                         ui.checkbox(&mut state.render_blocks, "Render blocks");
+
+                        ui.label(format!(
+                            "{:?}",
+                            state
+                                .pages
+                                .iter()
+                                .map(|page| page.render_pipeline.renderer.y)
+                                .collect::<Vec<f32>>()
+                        ));
                     });
                 }
             });
