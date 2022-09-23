@@ -1256,7 +1256,7 @@ fn run() {
     let mut egui_state = egui_winit::State::new(&event_loop);
     let mut ctx = egui::Context::default();
     let mut rp =
-        egui_wgpu::renderer::RenderPass::new(&state.device, wgpu::TextureFormat::Bgra8UnormSrgb, 1);
+        egui_wgpu::renderer::RenderPass::new(&state.device, wgpu::TextureFormat::Rgba8UnormSrgb, 1);
 
     let mut cursor: Option<egui::CursorIcon> = None;
     let mut cursor_position = winit::dpi::PhysicalPosition { x: 0., y: 0. };
@@ -1320,6 +1320,8 @@ fn run() {
                                     Some(
                                         keycode @ (VirtualKeyCode::Left
                                         | VirtualKeyCode::Right
+                                        | VirtualKeyCode::Up
+                                        | VirtualKeyCode::Down
                                         | VirtualKeyCode::D),
                                     ),
                                 ..
@@ -1331,6 +1333,12 @@ fn run() {
                         }
                         VirtualKeyCode::Right => {
                             state.navigate_to(&doc, state.page_count + 1).unwrap();
+                        }
+                        VirtualKeyCode::Down => {
+                            state.position.y -= 20.;
+                        }
+                        VirtualKeyCode::Up => {
+                            state.position.y = (state.position.y + 20.).min(0.);
                         }
                         VirtualKeyCode::D => {
                             state.show_debug = !state.show_debug;
