@@ -1287,6 +1287,8 @@ fn run() {
     let mut cursor: Option<egui::CursorIcon> = None;
     let mut cursor_position = winit::dpi::PhysicalPosition { x: 0., y: 0. };
 
+    let mut last_render_time = std::time::Instant::now();
+
     event_loop.run(move |event, _, control_flow| match event {
         Event::WindowEvent {
             ref event,
@@ -1422,14 +1424,11 @@ fn run() {
                         ui.checkbox(&mut state.render_lines, "Render lines");
                         ui.checkbox(&mut state.render_blocks, "Render blocks");
 
-                        ui.label(format!(
-                            "{:?}",
-                            state
-                                .pages
-                                .iter()
-                                .map(|page| page.render_pipeline.renderer.y)
-                                .collect::<Vec<f32>>()
-                        ));
+                        let elapsed = last_render_time.elapsed();
+                        let fps = std::time::Duration::from_secs(1).as_nanos() / elapsed.as_nanos();
+                        ui.label(format!("{:?}", elapsed));
+                        ui.label(format!("{}", fps));
+                        last_render_time = std::time::Instant::now();
                     });
                 }
             });
