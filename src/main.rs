@@ -40,6 +40,20 @@ struct QuadRenderer {
     changed: bool,
 }
 
+impl Default for QuadRenderer {
+    fn default() -> Self {
+        Self {
+            x: 0.,
+            y: 0.,
+            texture_width: 0,
+            texture_height: 0,
+            quad_width: 0,
+            quad_height: 0,
+            changed: true,
+        }
+    }
+}
+
 impl QuadRenderer {
     pub fn update(
         &mut self,
@@ -367,6 +381,12 @@ impl BlocksRenderPipeline {
     where
         I: Iterator<Item = T>,
     {
+        // If the point is not in valid texture space, assume that no quad will
+        // intercept it.
+        if point.x < 0. || point.x > 1. || point.y < 0. || point.y > 1. {
+            return None;
+        }
+
         let quads = &self.quads;
 
         for (item, quad) in std::iter::zip(it, quads) {
@@ -378,8 +398,10 @@ impl BlocksRenderPipeline {
         None
     }
 
+    /// Returns whether or not any quad from this render pipeline contains the
+    /// given point in texture space [0, 1].
     fn hovers_quad(&self, point: &Point) -> bool {
-        return self.find_hovering(std::iter::repeat(()), &point).is_some();
+        return self.find_hovering(std::iter::repeat(()), point).is_some();
     }
 
     fn clear_blocks(&mut self) {
@@ -517,6 +539,7 @@ struct PageRenderPipeline {
     block_render_pipeline: BlocksRenderPipeline,
     line_render_pipeline: BlocksRenderPipeline,
     link_render_pipeline: BlocksRenderPipeline,
+    search_render_pipeline: BlocksRenderPipeline,
 }
 
 impl PageRenderPipeline {
@@ -609,6 +632,7 @@ impl PageRenderPipeline {
         let block_render_pipeline = BlocksRenderPipeline::new(&device, 0, &config, &shader);
         let line_render_pipeline = BlocksRenderPipeline::new(&device, 0, &config, &shader);
         let link_render_pipeline = BlocksRenderPipeline::new(&device, 0, &config, &shader);
+        let search_render_pipeline = BlocksRenderPipeline::new(&device, 0, &config, &shader);
 
         let page_render_pipeline = PageRenderPipeline {
             texture: None,
@@ -619,32 +643,26 @@ impl PageRenderPipeline {
             bind_group_layout: texture_bind_group_layout,
             bind_group: None,
 
-            // TODO: Impl default::Default()
-            renderer: QuadRenderer {
-                x: 0.,
-                y: 0.,
-                texture_width: 0,
-                texture_height: 0,
-                quad_width: 0,
-                quad_height: 0,
-                changed: true,
-            },
+            renderer: QuadRenderer::default(),
 
             block_render_pipeline,
             line_render_pipeline,
             link_render_pipeline,
+            search_render_pipeline,
         };
 
         return page_render_pipeline;
     }
 
-    /// Returns wether or not part of the rendered texture are visible on the screen.
+    /// Returns wether or not parts of the rendered texture are visible on the screen.
     fn is_visible(&self) -> bool {
         return true;
 
-        self.renderer.y >= 0.
-            && self.renderer.y + self.renderer.texture_height as f32
-                <= self.renderer.quad_height as f32
+        // Separating Axis Theorem for box intersections between rect A & B
+        // 1. Iterate over each vertex in A
+        // 2. Compute an orthogonal vector to each vertex
+        // 3. If all points in B are in the opposite direction of the edge then they
+        //    are not colliding with A. Check the next edge (1.).
     }
 
     fn highlight_blocks(&mut self, page: &RenderedPage) -> Result<(), mupdf::Error> {
@@ -789,6 +807,7 @@ impl PageRenderPipeline {
         render_pass: &mut wgpu::RenderPass<'a>,
         render_blocks: bool,
         render_lines: bool,
+        render_links: bool,
     ) {
         if !self.is_visible() {
             return;
@@ -814,8 +833,12 @@ impl PageRenderPipeline {
             self.line_render_pipeline
                 .render(device, queue, render_pass, &self.renderer);
         }
-        self.link_render_pipeline
-            .render(&device, &queue, render_pass, &self.renderer);
+        if render_links {
+            self.link_render_pipeline
+                .render(device, queue, render_pass, &self.renderer);
+        }
+        self.search_render_pipeline
+            .render(device, queue, render_pass, &self.renderer);
     }
 
     fn from_pos_to_page(&self, pos: winit::dpi::PhysicalPosition<f64>) -> Point {
@@ -899,6 +922,28 @@ impl Page {
         );
     }
 
+    const MAX_SEARCH_RESULTS: u32 = 10;
+    fn search(&mut self, query: &str) -> Result<usize, mupdf::Error> {
+        self.render_pipeline.search_render_pipeline.clear_blocks();
+
+        if query.len() == 0 {
+            return Ok(0);
+        }
+
+        let page_bounds = self.page.page.bounds()?;
+        let results = self.page.page.search(query, Self::MAX_SEARCH_RESULTS)?;
+        for result in &results {
+            self.render_pipeline.search_render_pipeline.add_block(Quad {
+                x: result.ul.x / page_bounds.width(),
+                y: result.ul.y / page_bounds.height(),
+                width: (result.lr.x - result.ul.x) / page_bounds.width(),
+                height: (result.lr.y - result.ul.y) / page_bounds.height(),
+            });
+        }
+
+        Ok(results.len())
+    }
+
     fn highlight_blocks(&mut self) -> Result<(), mupdf::Error> {
         self.render_pipeline.highlight_blocks(&self.page)?;
         Ok(())
@@ -978,9 +1023,16 @@ impl Page {
         render_pass: &mut wgpu::RenderPass<'a>,
         render_blocks: bool,
         render_lines: bool,
+        render_links: bool,
     ) {
-        self.render_pipeline
-            .render(device, queue, render_pass, render_blocks, render_lines);
+        self.render_pipeline.render(
+            device,
+            queue,
+            render_pass,
+            render_blocks,
+            render_lines,
+            render_links,
+        );
     }
 }
 
@@ -999,6 +1051,7 @@ struct State {
 
     render_blocks: bool,
     render_lines: bool,
+    render_links: bool,
     show_debug: bool,
 }
 
@@ -1052,6 +1105,7 @@ impl State {
 
             render_blocks: false,
             render_lines: false,
+            render_links: true,
             show_debug: false,
         }
     }
@@ -1170,6 +1224,7 @@ impl State {
                     &mut render_pass,
                     self.render_blocks,
                     self.render_lines,
+                    self.render_links,
                 );
             }
             rp.execute_with_renderpass(&mut render_pass, &primitives, &descriptor);
@@ -1235,6 +1290,13 @@ impl State {
 
         Ok(())
     }
+
+    fn search(&mut self, query: &str) -> Result<(), mupdf::Error> {
+        for page in self.pages.iter_mut() {
+            page.search(query)?;
+        }
+        Ok(())
+    }
 }
 
 fn run() {
@@ -1288,6 +1350,7 @@ fn run() {
     let mut cursor_position = winit::dpi::PhysicalPosition { x: 0., y: 0. };
 
     let mut last_render_time = std::time::Instant::now();
+    let mut query = String::new();
 
     event_loop.run(move |event, _, control_flow| match event {
         Event::WindowEvent {
@@ -1421,8 +1484,11 @@ fn run() {
                 });
                 if state.show_debug {
                     egui::Window::new("debug_win").show(&ctx, |ui| {
+                        ui.text_edit_singleline(&mut query);
+
                         ui.checkbox(&mut state.render_lines, "Render lines");
                         ui.checkbox(&mut state.render_blocks, "Render blocks");
+                        ui.checkbox(&mut state.render_links, "Render links");
 
                         let elapsed = last_render_time.elapsed();
                         let fps = std::time::Duration::from_secs(1).as_nanos() / elapsed.as_nanos();
@@ -1444,6 +1510,7 @@ fn run() {
 
             state.resize(winsize);
             state.update(&doc).unwrap();
+            state.search(&query).unwrap();
 
             match state.render(&mut rp, primitives, textures) {
                 Ok(_) => {}
@@ -1471,6 +1538,7 @@ fn main() {
     let subscriber = tracing_subscriber::FmtSubscriber::builder()
         .with_max_level(tracing::Level::TRACE)
         .with_writer(std::sync::Arc::new(log_file))
+        .with_writer(std::io::stderr)
         .finish();
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
