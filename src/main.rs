@@ -849,6 +849,7 @@ impl PageRenderPipeline {
 
 struct RenderedPage {
     page: mupdf::Page,
+    display_list: mupdf::DisplayList,
     pixmap: mupdf::Pixmap,
     textpage: mupdf::TextPage,
 }
@@ -857,12 +858,16 @@ impl RenderedPage {
     pub fn new(doc: &mupdf::Document, page_count: i32) -> Result<Self, mupdf::Error> {
         let page = doc.load_page(page_count)?;
 
+        let display_list = page.to_display_list(false)?;
+        let textpage = display_list.to_text_page(mupdf::TextPageOptions::BLOCK_TEXT)?;
+
         // TODO: Create pixmap with right size
         let mat = mupdf::Matrix::new_scale(1., 1.);
-        let pixmap = page.to_pixmap(&mat, &mupdf::Colorspace::device_rgb(), 1., false)?;
-        let textpage = page.to_text_page(mupdf::TextPageOptions::BLOCK_TEXT)?;
+        let pixmap = display_list.to_pixmap(&mat, &mupdf::Colorspace::device_rgb(), true)?;
+
         Ok(Self {
             page,
+            display_list,
             pixmap,
             textpage,
         })
@@ -870,9 +875,7 @@ impl RenderedPage {
 
     fn rerender(&mut self, scale_factor: f32) -> Result<(), mupdf::Error> {
         let mat = mupdf::Matrix::new_scale(scale_factor, scale_factor);
-        self.pixmap = self
-            .page
-            .to_pixmap(&mat, &mupdf::Colorspace::device_rgb(), 1., false)?;
+        self.pixmap = self.display_list.to_pixmap(&mat, &mupdf::Colorspace::device_rgb(), true)?;
         Ok(())
     }
 }
@@ -1405,7 +1408,7 @@ fn run() {
                                     }
                                 }
                             } else {
-                                dbg!(&link.uri);
+                                webbrowser::open(&link.uri).unwrap();
                             }
                         }
                     }

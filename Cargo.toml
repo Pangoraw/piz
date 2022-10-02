@@ -18,3 +18,4 @@ bytemuck = { version = "1.4", features = [ "derive" ] }
 egui-wgpu = "0.19"
 egui = "0.19"
 egui-winit = "0.19"
+webbrowser = "0.8"
