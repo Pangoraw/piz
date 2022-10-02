@@ -656,13 +656,13 @@ impl PageRenderPipeline {
 
     /// Returns wether or not parts of the rendered texture are visible on the screen.
     fn is_visible(&self) -> bool {
-        return true;
+        let ul = self.renderer.from_texture(0., 0.);
+        let br = self.renderer.from_texture(1., 1.);
 
-        // Separating Axis Theorem for box intersections between rect A & B
-        // 1. Iterate over each vertex in A
-        // 2. Compute an orthogonal vector to each vertex
-        // 3. If all points in B are in the opposite direction of the edge then they
-        //    are not colliding with A. Check the next edge (1.).
+        ((ul.y >= 0. && ul.y <= 1.) || (br.y >= 0. && br.y <= 1.) || (ul.y < 0. && br.y > 1.))
+            && ((ul.x >= 0. && ul.x <= 1.)
+                || (br.x >= 0. && br.x <= 1.)
+                || (ul.x < 0. && br.x > 1.))
     }
 
     fn highlight_blocks(&mut self, page: &RenderedPage) -> Result<(), mupdf::Error> {
@@ -910,16 +910,15 @@ impl Page {
             self.page
                 .rerender(winwidth as f32 / self.width().unwrap())
                 .unwrap();
+            self.render_pipeline.create_texture(
+                device,
+                queue,
+                &self.page.pixmap,
+                winwidth,
+                winheight,
+                force,
+            );
         }
-
-        self.render_pipeline.create_texture(
-            device,
-            queue,
-            &self.page.pixmap,
-            winwidth,
-            winheight,
-            force,
-        );
     }
 
     const MAX_SEARCH_RESULTS: u32 = 10;
@@ -1033,6 +1032,10 @@ impl Page {
             render_lines,
             render_links,
         );
+    }
+
+    fn is_visible(&self) -> bool {
+        self.render_pipeline.is_visible()
     }
 }
 
@@ -1247,21 +1250,24 @@ impl State {
     }
 
     fn hovers_link(&self, position: winit::dpi::PhysicalPosition<f64>) -> bool {
-        self.pages.iter().any(|page| page.hovers_link(position))
+        self.pages
+            .iter()
+            .filter(|page| page.is_visible())
+            .any(|page| page.hovers_link(position))
     }
 
     fn hovers_line(&self, position: winit::dpi::PhysicalPosition<f64>) -> bool {
-        self.pages.iter().any(|page| page.hovers_line(position))
+        self.pages
+            .iter()
+            .filter(|page| page.is_visible())
+            .any(|page| page.hovers_line(position))
     }
 
     fn find_hovering_link(&self, pos: winit::dpi::PhysicalPosition<f64>) -> Option<mupdf::Link> {
         // TODO: filter pages based on their big quad instead of iterating every page
         let mut i = 0;
-        for page in &self.pages {
+        for page in self.pages.iter().filter(|page| page.is_visible()) {
             let point = page.render_pipeline.from_pos_to_page(pos);
-            if page.render_pipeline.renderer.contains(&point) {
-                println!("match = {}", i);
-            }
             i += 1;
 
             match page.find_hovering_link(&point) {
@@ -1306,11 +1312,10 @@ fn run() {
     tracing::debug!("args = {:?}", &args);
 
     let exe_name = &args[0];
-    let filename = if args.len() != 2 {
-        String::from("/home/paul/Downloads/remotesensing-1853970.pdf")
-    } else {
-        args.last().take().unwrap().to_string()
-    };
+    if args.len() != 2 {
+        Err::<(), &str>("Please provide the file name").unwrap();
+    }
+    let filename = args.last().take().unwrap().to_string();
     let prettyname = {
         let path = std::path::Path::new(&filename);
         String::from(path.file_name().unwrap().to_str().unwrap())
@@ -1344,7 +1349,7 @@ fn run() {
     let mut egui_state = egui_winit::State::new(&event_loop);
     let mut ctx = egui::Context::default();
     let mut rp =
-        egui_wgpu::renderer::RenderPass::new(&state.device, wgpu::TextureFormat::Rgba8UnormSrgb, 1);
+        egui_wgpu::renderer::RenderPass::new(&state.device, wgpu::TextureFormat::Bgra8UnormSrgb, 1);
 
     let mut cursor: Option<egui::CursorIcon> = None;
     let mut cursor_position = winit::dpi::PhysicalPosition { x: 0., y: 0. };
