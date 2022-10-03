@@ -1374,7 +1374,15 @@ fn run() {
     let mut egui_state = egui_winit::State::new(&event_loop);
     let mut ctx = egui::Context::default();
 
-    let texture_format = wgpu::TextureFormat::Rgba8UnormSrgb; // pc-mna-206
+    // I have no idea why the expected texture format is different depending on the device 🤔
+    // TODO: look at how egui_winit does it in a managed way
+    let texture_format = match std::env::var("HOSTNAME") {
+        Err(_) => wgpu::TextureFormat::Rgba8UnormSrgb,
+        Ok(s) => match s.as_str() {
+            "grapefruit" => wgpu::TextureFormat::Bgra8UnormSrgb,
+            _ => wgpu::TextureFormat::Rgba8UnormSrgb,
+        },
+    };
     let mut rp = egui_wgpu::renderer::RenderPass::new(&state.device, texture_format, 1);
 
     let mut bar = search_bar::SearchWindow::default();
@@ -1448,7 +1456,8 @@ fn run() {
                                         | VirtualKeyCode::Up
                                         | VirtualKeyCode::Down
                                         | VirtualKeyCode::D
-                                        | VirtualKeyCode::R),
+                                        | VirtualKeyCode::R
+                                        | VirtualKeyCode::Slash),
                                     ),
                                 ..
                             },
@@ -1472,6 +1481,9 @@ fn run() {
                         VirtualKeyCode::R => {
                             doc = mupdf::Document::open(&filename).unwrap();
                             state.rerender_document(&doc).unwrap();
+                        }
+                        VirtualKeyCode::Slash => {
+                            bar.toggle_shown();
                         }
                         _ => {}
                     },
@@ -1525,7 +1537,7 @@ fn run() {
                     });
                 }
                 if state.show_debug {
-                    egui::Window::new("debug_win").show(&ctx, |ui| {
+                    egui::Window::new("Debug Window").show(&ctx, |ui| {
                         ui.text_edit_singleline(&mut query);
 
                         should_refresh_doc = ui.button("Refresh doc").clicked();
@@ -1555,7 +1567,13 @@ fn run() {
                 control_flow.set_wait()
             }
 
-            if should_refresh_doc {
+            if should_refresh_doc || bar.has_file_to_open() {
+                let filename = if bar.has_file_to_open() {
+                    bar.file_to_open().unwrap().to_str().unwrap().to_string()
+                } else {
+                    filename.to_string()
+                };
+
                 doc = mupdf::Document::open(&filename).unwrap();
                 state.rerender_document(&doc).unwrap();
             }
