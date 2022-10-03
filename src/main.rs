@@ -6,6 +6,8 @@ use egui_winit::winit::{
 };
 use wgpu::{include_wgsl, util::DeviceExt};
 
+mod search_bar;
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 struct Vertex {
@@ -1375,6 +1377,8 @@ fn run() {
     let texture_format = wgpu::TextureFormat::Rgba8UnormSrgb; // pc-mna-206
     let mut rp = egui_wgpu::renderer::RenderPass::new(&state.device, texture_format, 1);
 
+    let mut bar = search_bar::SearchWindow::default();
+
     let mut cursor: Option<egui::CursorIcon> = None;
     let mut cursor_position = winit::dpi::PhysicalPosition { x: 0., y: 0. };
 
@@ -1486,6 +1490,7 @@ fn run() {
 
             let mut should_refresh_doc = false;
             let mut output = ctx.run(egui_state.take_egui_input(&window), |ctx| {
+                bar.render(ctx);
                 if state.render_nav_bar {
                     egui::TopBottomPanel::bottom("bottom_panel").show(&ctx, |ui| {
                         ui.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
