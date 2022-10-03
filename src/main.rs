@@ -1288,6 +1288,10 @@ impl State {
         doc: &mupdf::Document,
         page_number: usize,
     ) -> Result<(), mupdf::Error> {
+        if page_number >= doc.page_count()? as usize {
+            return Ok(());
+        }
+
         // Add missing pages
         while self.pages.len() <= page_number {
             self.add_page(doc, self.pages.len() as i32)?;
