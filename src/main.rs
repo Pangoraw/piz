@@ -1367,178 +1367,186 @@ fn run() {
     let mut last_render_time = std::time::Instant::now();
     let mut query = String::new();
 
-    event_loop.run(move |event, _, control_flow| match event {
-        Event::WindowEvent {
-            ref event,
-            window_id,
-        } if window_id == window.id() => {
-            if !egui_state.on_event(&mut ctx, &event) {
-                match event {
-                    WindowEvent::CursorMoved { position, .. } => {
-                        if state.hovers_link(*position) {
-                            cursor = Some(egui::CursorIcon::PointingHand);
-                        } else if state.hovers_line(*position) {
-                            cursor = Some(egui::CursorIcon::Text);
-                        } else {
-                            cursor = None;
-                        }
-                        cursor_position = *position;
-                    }
-                    WindowEvent::CloseRequested
-                    | WindowEvent::KeyboardInput {
-                        input:
-                            KeyboardInput {
-                                state: ElementState::Pressed,
-                                virtual_keycode: Some(VirtualKeyCode::Escape),
-                                ..
-                            },
-                        ..
-                    } => *control_flow = ControlFlow::Exit,
-                    WindowEvent::MouseWheel {
-                        delta: winit::event::MouseScrollDelta::LineDelta(xd, yd),
-                        ..
-                    } => {
-                        state.position.x += 10. * xd;
-                        state.position.y = (state.position.y + 10. * yd).min(0.);
-                    }
-                    WindowEvent::MouseInput {
-                        state: winit::event::ElementState::Pressed,
-                        ..
-                    } => {
-                        if let Some(link) = state.find_hovering_link(cursor_position) {
-                            if let Some(uri) = link.uri.strip_prefix("#page=") {
-                                if let Some((page_number, _)) = uri.split_once('&') {
-                                    let page_number =
-                                        usize::from_str_radix(page_number, 10).unwrap() - 1;
-                                    if page_number < doc.page_count().unwrap() as usize {
-                                        state.navigate_to(&doc, page_number).unwrap();
-                                    }
-                                }
+    event_loop.run(move |event, _, control_flow| {
+        match event {
+            Event::WindowEvent {
+                ref event,
+                window_id,
+            } if window_id == window.id() => {
+                if !egui_state.on_event(&mut ctx, &event) {
+                    match event {
+                        WindowEvent::CursorMoved { position, .. } => {
+                            if state.hovers_link(*position) {
+                                cursor = Some(egui::CursorIcon::PointingHand);
+                            } else if state.hovers_line(*position) {
+                                cursor = Some(egui::CursorIcon::Text);
                             } else {
-                                webbrowser::open(&link.uri).unwrap();
+                                cursor = None;
+                            }
+                            cursor_position = *position;
+                        }
+                        WindowEvent::CloseRequested
+                        | WindowEvent::KeyboardInput {
+                            input:
+                                KeyboardInput {
+                                    state: ElementState::Pressed,
+                                    virtual_keycode: Some(VirtualKeyCode::Escape),
+                                    ..
+                                },
+                            ..
+                        } => control_flow.set_exit(),
+                        WindowEvent::MouseWheel {
+                            delta: winit::event::MouseScrollDelta::LineDelta(xd, yd),
+                            ..
+                        } => {
+                            state.position.x += 10. * xd;
+                            state.position.y = (state.position.y + 10. * yd).min(0.);
+                        }
+                        WindowEvent::MouseInput {
+                            state: winit::event::ElementState::Pressed,
+                            ..
+                        } => {
+                            if let Some(link) = state.find_hovering_link(cursor_position) {
+                                if let Some(uri) = link.uri.strip_prefix("#page=") {
+                                    if let Some((page_number, _)) = uri.split_once('&') {
+                                        let page_number =
+                                            usize::from_str_radix(page_number, 10).unwrap() - 1;
+                                        if page_number < doc.page_count().unwrap() as usize {
+                                            state.navigate_to(&doc, page_number).unwrap();
+                                        }
+                                    }
+                                } else {
+                                    webbrowser::open(&link.uri).unwrap();
+                                }
                             }
                         }
-                    }
-                    WindowEvent::KeyboardInput {
-                        input:
-                            KeyboardInput {
-                                state: ElementState::Pressed,
-                                virtual_keycode:
-                                    Some(
-                                        keycode @ (VirtualKeyCode::Left
-                                        | VirtualKeyCode::Right
-                                        | VirtualKeyCode::Up
-                                        | VirtualKeyCode::Down
-                                        | VirtualKeyCode::D),
-                                    ),
-                                ..
-                            },
-                        ..
-                    } => match keycode {
-                        VirtualKeyCode::Left if state.page_count > 0 => {
-                            state.navigate_to(&doc, state.page_count - 1).unwrap();
+                        WindowEvent::KeyboardInput {
+                            input:
+                                KeyboardInput {
+                                    state: ElementState::Pressed,
+                                    virtual_keycode:
+                                        Some(
+                                            keycode @ (VirtualKeyCode::Left
+                                            | VirtualKeyCode::Right
+                                            | VirtualKeyCode::Up
+                                            | VirtualKeyCode::Down
+                                            | VirtualKeyCode::D),
+                                        ),
+                                    ..
+                                },
+                            ..
+                        } => match keycode {
+                            VirtualKeyCode::Left if state.page_count > 0 => {
+                                state.navigate_to(&doc, state.page_count - 1).unwrap();
+                            }
+                            VirtualKeyCode::Right => {
+                                state.navigate_to(&doc, state.page_count + 1).unwrap();
+                            }
+                            VirtualKeyCode::Down => {
+                                state.position.y -= 20.;
+                            }
+                            VirtualKeyCode::Up => {
+                                state.position.y = (state.position.y + 20.).min(0.);
+                            }
+                            VirtualKeyCode::D => {
+                                state.show_debug = !state.show_debug;
+                            }
+                            _ => {}
+                        },
+                        WindowEvent::Resized(physical_size) => {
+                            state.resize(*physical_size);
                         }
-                        VirtualKeyCode::Right => {
-                            state.navigate_to(&doc, state.page_count + 1).unwrap();
-                        }
-                        VirtualKeyCode::Down => {
-                            state.position.y -= 20.;
-                        }
-                        VirtualKeyCode::Up => {
-                            state.position.y = (state.position.y + 20.).min(0.);
-                        }
-                        VirtualKeyCode::D => {
-                            state.show_debug = !state.show_debug;
+                        WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
+                            state.resize(**new_inner_size);
                         }
                         _ => {}
-                    },
-                    WindowEvent::Resized(physical_size) => {
-                        state.resize(*physical_size);
                     }
-                    WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
-                        state.resize(**new_inner_size);
-                    }
-                    _ => {}
                 }
             }
-        }
-        Event::RedrawRequested(window_id) if window_id == window.id() => {
-            let winsize = window.inner_size();
+            Event::RedrawRequested(window_id) if window_id == window.id() => {
+                let winsize = window.inner_size();
 
-            let mut output = ctx.run(egui_state.take_egui_input(&window), |ctx| {
-                egui::TopBottomPanel::bottom("bottom_panel").show(&ctx, |ui| {
-                    ui.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "{}/{}",
-                                state.page_count + 1,
-                                doc.page_count().unwrap()
-                            ))
-                            .size(20.),
-                        );
-                        ui.centered_and_justified(|ui| {
-                            let mut job = egui::text::LayoutJob::single_section(
-                                prettyname.to_owned(),
-                                egui::text::TextFormat::simple(
-                                    egui::FontId {
-                                        size: 20.,
-                                        family: egui::text::FontFamily::Monospace,
-                                    },
-                                    egui::Color32::GRAY,
-                                ),
+                let mut output = ctx.run(egui_state.take_egui_input(&window), |ctx| {
+                    egui::TopBottomPanel::bottom("bottom_panel").show(&ctx, |ui| {
+                        ui.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{}/{}",
+                                    state.page_count + 1,
+                                    doc.page_count().unwrap()
+                                ))
+                                .size(20.),
                             );
-                            job.wrap = egui::epaint::text::TextWrapping {
-                                max_rows: 1,
-                                overflow_character: Some('…'),
-                                ..Default::default()
-                            };
-                            ui.label(job);
+                            ui.centered_and_justified(|ui| {
+                                let mut job = egui::text::LayoutJob::single_section(
+                                    prettyname.to_owned(),
+                                    egui::text::TextFormat::simple(
+                                        egui::FontId {
+                                            size: 20.,
+                                            family: egui::text::FontFamily::Monospace,
+                                        },
+                                        egui::Color32::GRAY,
+                                    ),
+                                );
+                                job.wrap = egui::epaint::text::TextWrapping {
+                                    max_rows: 1,
+                                    overflow_character: Some('…'),
+                                    ..Default::default()
+                                };
+                                ui.label(job);
+                            });
                         });
                     });
+                    if state.show_debug {
+                        egui::Window::new("debug_win").show(&ctx, |ui| {
+                            ui.text_edit_singleline(&mut query);
+
+                            ui.checkbox(&mut state.render_lines, "Render lines");
+                            ui.checkbox(&mut state.render_blocks, "Render blocks");
+                            ui.checkbox(&mut state.render_links, "Render links");
+
+                            let elapsed = last_render_time.elapsed();
+                            let fps =
+                                std::time::Duration::from_secs(1).as_nanos() / elapsed.as_nanos();
+                            ui.label(format!("{:?}", elapsed));
+                            ui.label(format!("{}", fps));
+                            last_render_time = std::time::Instant::now();
+                        });
+                    }
                 });
-                if state.show_debug {
-                    egui::Window::new("debug_win").show(&ctx, |ui| {
-                        ui.text_edit_singleline(&mut query);
-
-                        ui.checkbox(&mut state.render_lines, "Render lines");
-                        ui.checkbox(&mut state.render_blocks, "Render blocks");
-                        ui.checkbox(&mut state.render_links, "Render links");
-
-                        let elapsed = last_render_time.elapsed();
-                        let fps = std::time::Duration::from_secs(1).as_nanos() / elapsed.as_nanos();
-                        ui.label(format!("{:?}", elapsed));
-                        ui.label(format!("{}", fps));
-                        last_render_time = std::time::Instant::now();
-                    });
+                if let Some(cursor) = cursor {
+                    if !ctx.is_pointer_over_area() {
+                        output.platform_output.cursor_icon = cursor;
+                    }
                 }
-            });
-            if let Some(cursor) = cursor {
-                if !ctx.is_pointer_over_area() {
-                    output.platform_output.cursor_icon = cursor;
+                egui_state.handle_platform_output(&window, &ctx, output.platform_output);
+                if output.repaint_after.is_zero() {
+                    control_flow.set_poll();
+                } else {
+                    control_flow.set_wait()
+                }
+
+                let primitives = ctx.tessellate(output.shapes);
+                let textures = output.textures_delta;
+
+                state.resize(winsize);
+                state.update(&doc).unwrap();
+                state.search(&query).unwrap();
+
+                match state.render(&mut rp, primitives, textures) {
+                    Ok(_) => {}
+
+                    Err(wgpu::SurfaceError::Lost) => state.resize(winsize),
+                    Err(wgpu::SurfaceError::OutOfMemory) => control_flow.set_exit(),
+                    Err(e) => println!("error: {:?}", e),
                 }
             }
-            egui_state.handle_platform_output(&window, &ctx, output.platform_output);
-
-            let primitives = ctx.tessellate(output.shapes);
-            let textures = output.textures_delta;
-
-            state.resize(winsize);
-            state.update(&doc).unwrap();
-            state.search(&query).unwrap();
-
-            match state.render(&mut rp, primitives, textures) {
-                Ok(_) => {}
-
-                Err(wgpu::SurfaceError::Lost) => state.resize(winsize),
-                Err(wgpu::SurfaceError::OutOfMemory) => *control_flow = ControlFlow::Exit,
-                Err(e) => println!("error: {:?}", e),
+            Event::MainEventsCleared => {
+                window.request_redraw();
             }
+            _ => {}
         }
-        Event::MainEventsCleared => {
-            window.request_redraw();
-        }
-        _ => {}
     })
 }
 
