@@ -875,7 +875,9 @@ impl RenderedPage {
 
     fn rerender(&mut self, scale_factor: f32) -> Result<(), mupdf::Error> {
         let mat = mupdf::Matrix::new_scale(scale_factor, scale_factor);
-        self.pixmap = self.display_list.to_pixmap(&mat, &mupdf::Colorspace::device_rgb(), true)?;
+        self.pixmap = self
+            .display_list
+            .to_pixmap(&mat, &mupdf::Colorspace::device_rgb(), true)?;
         Ok(())
     }
 }
@@ -1351,8 +1353,9 @@ fn run() {
 
     let mut egui_state = egui_winit::State::new(&event_loop);
     let mut ctx = egui::Context::default();
-    let mut rp =
-        egui_wgpu::renderer::RenderPass::new(&state.device, wgpu::TextureFormat::Bgra8UnormSrgb, 1);
+
+    let texture_format = wgpu::TextureFormat::Rgba8UnormSrgb; // pc-mna-206
+    let mut rp = egui_wgpu::renderer::RenderPass::new(&state.device, texture_format, 1);
 
     let mut cursor: Option<egui::CursorIcon> = None;
     let mut cursor_position = winit::dpi::PhysicalPosition { x: 0., y: 0. };
