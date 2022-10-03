@@ -1060,6 +1060,7 @@ struct State {
     render_blocks: bool,
     render_lines: bool,
     render_links: bool,
+    render_nav_bar: bool,
     show_debug: bool,
 }
 
@@ -1114,6 +1115,7 @@ impl State {
             render_blocks: false,
             render_lines: false,
             render_links: true,
+            render_nav_bar: true,
             show_debug: false,
         }
     }
@@ -1484,37 +1486,39 @@ fn run() {
 
             let mut should_refresh_doc = false;
             let mut output = ctx.run(egui_state.take_egui_input(&window), |ctx| {
-                egui::TopBottomPanel::bottom("bottom_panel").show(&ctx, |ui| {
-                    ui.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "{}/{}",
-                                state.page_count + 1,
-                                doc.page_count().unwrap()
-                            ))
-                            .size(20.),
-                        );
-                        ui.centered_and_justified(|ui| {
-                            let mut job = egui::text::LayoutJob::single_section(
-                                prettyname.to_owned(),
-                                egui::text::TextFormat::simple(
-                                    egui::FontId {
-                                        size: 20.,
-                                        family: egui::text::FontFamily::Monospace,
-                                    },
-                                    egui::Color32::GRAY,
-                                ),
+                if state.render_nav_bar {
+                    egui::TopBottomPanel::bottom("bottom_panel").show(&ctx, |ui| {
+                        ui.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{}/{}",
+                                    state.page_count + 1,
+                                    doc.page_count().unwrap()
+                                ))
+                                .size(20.),
                             );
-                            job.wrap = egui::epaint::text::TextWrapping {
-                                max_rows: 1,
-                                overflow_character: Some('…'),
-                                ..Default::default()
-                            };
-                            ui.label(job);
+                            ui.centered_and_justified(|ui| {
+                                let mut job = egui::text::LayoutJob::single_section(
+                                    prettyname.to_owned(),
+                                    egui::text::TextFormat::simple(
+                                        egui::FontId {
+                                            size: 20.,
+                                            family: egui::text::FontFamily::Monospace,
+                                        },
+                                        egui::Color32::GRAY,
+                                    ),
+                                );
+                                job.wrap = egui::epaint::text::TextWrapping {
+                                    max_rows: 1,
+                                    overflow_character: Some('…'),
+                                    ..Default::default()
+                                };
+                                ui.label(job);
+                            });
                         });
                     });
-                });
+                }
                 if state.show_debug {
                     egui::Window::new("debug_win").show(&ctx, |ui| {
                         ui.text_edit_singleline(&mut query);
@@ -1524,6 +1528,7 @@ fn run() {
                         ui.checkbox(&mut state.render_lines, "Render lines");
                         ui.checkbox(&mut state.render_blocks, "Render blocks");
                         ui.checkbox(&mut state.render_links, "Render links");
+                        ui.checkbox(&mut state.render_nav_bar, "Render nav bar");
 
                         let elapsed = last_render_time.elapsed();
                         let fps = std::time::Duration::from_secs(1).as_nanos() / elapsed.as_nanos();
