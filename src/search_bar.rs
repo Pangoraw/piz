@@ -26,7 +26,17 @@ pub struct SearchWindow {
 }
 
 fn zotero_path() -> PathBuf {
-    home::home_dir().unwrap().join("Zotero")
+    match std::env::var("HOSTNAME") {
+        Ok(s) => match s.as_str() {
+            "grapefruit" => home::home_dir().unwrap().join("Zotero"),
+            _ => home::home_dir()
+                .unwrap()
+                .join("snap/zotero-snap/common/Zotero"),
+        },
+        _ => home::home_dir()
+            .unwrap()
+            .join("snap/zotero-snap/common/Zotero"),
+    }
 }
 
 impl Default for SearchWindow {
@@ -113,65 +123,69 @@ impl SearchWindow {
                     return;
                 }
 
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for (i, result) in self.results.iter().enumerate() {
-                        if !result.path().exists() {
-                            continue;
-                        }
-                        if let Some(pos) = result.title.to_lowercase().find(&self.query) {
-                            let (first_part, second_part) = result.title.split_at(pos);
-                            let (second_part, third_part) = second_part.split_at(self.query.len());
-
-                            let mut job = egui::text::LayoutJob::default();
-                            job.append(
-                                &first_part,
-                                0.0,
-                                egui::TextFormat::simple(
-                                    egui::FontId {
-                                        size: 25.,
-                                        family: egui::text::FontFamily::Monospace,
-                                    },
-                                    egui::Color32::GRAY,
-                                ),
-                            );
-                            job.append(
-                                &second_part,
-                                0.0,
-                                egui::TextFormat::simple(
-                                    egui::FontId {
-                                        size: 25.,
-                                        family: egui::text::FontFamily::Monospace,
-                                    },
-                                    egui::Color32::LIGHT_RED,
-                                ),
-                            );
-                            job.append(
-                                &third_part,
-                                0.0,
-                                egui::TextFormat::simple(
-                                    egui::FontId {
-                                        size: 25.,
-                                        family: egui::text::FontFamily::Monospace,
-                                    },
-                                    egui::Color32::GRAY,
-                                ),
-                            );
-                            job.wrap = egui::epaint::text::TextWrapping {
-                                max_rows: 1,
-                                overflow_character: Some('…'),
-                                ..Default::default()
-                            };
-
-                            let button = ui.add(egui::Button::new(job).frame(false));
-                            if button.hovered() {
-                                ui.output().cursor_icon = egui::CursorIcon::PointingHand;
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for (i, result) in self.results.iter().enumerate() {
+                            if !result.path().exists() {
+                                continue;
                             }
-                            if button.clicked() {
-                                self.should_open_file = Some(i);
+                            if let Some(pos) = result.title.to_lowercase().find(&self.query) {
+                                let (first_part, second_part) = result.title.split_at(pos);
+                                let (second_part, third_part) =
+                                    second_part.split_at(self.query.len());
+
+                                let mut job = egui::text::LayoutJob::default();
+                                job.append(
+                                    &first_part,
+                                    0.0,
+                                    egui::TextFormat::simple(
+                                        egui::FontId {
+                                            size: 25.,
+                                            family: egui::text::FontFamily::Monospace,
+                                        },
+                                        egui::Color32::GRAY,
+                                    ),
+                                );
+                                job.append(
+                                    &second_part,
+                                    0.0,
+                                    egui::TextFormat::simple(
+                                        egui::FontId {
+                                            size: 25.,
+                                            family: egui::text::FontFamily::Monospace,
+                                        },
+                                        egui::Color32::LIGHT_RED,
+                                    ),
+                                );
+                                job.append(
+                                    &third_part,
+                                    0.0,
+                                    egui::TextFormat::simple(
+                                        egui::FontId {
+                                            size: 25.,
+                                            family: egui::text::FontFamily::Monospace,
+                                        },
+                                        egui::Color32::GRAY,
+                                    ),
+                                );
+                                job.wrap = egui::epaint::text::TextWrapping {
+                                    max_rows: 1,
+                                    overflow_character: Some('…'),
+                                    break_anywhere: true,
+                                    ..Default::default()
+                                };
+
+                                let button = ui.add(egui::Button::new(job).frame(false));
+                                if button.hovered() {
+                                    ui.output().cursor_icon = egui::CursorIcon::PointingHand;
+                                }
+                                if button.clicked() {
+                                    self.should_open_file = Some(i);
+                                }
                             }
                         }
-                    }
-                });
+                    });
             });
     }
 
