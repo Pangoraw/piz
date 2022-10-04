@@ -436,97 +436,6 @@ impl Point {
     }
 }
 
-struct TextHighlighter {
-    text_page: mupdf::TextPage,
-    block_render_pipeline: BlocksRenderPipeline,
-    anchor: Option<Point>,
-    head: Option<Point>,
-}
-
-impl TextHighlighter {
-    fn new(page: mupdf::TextPage, block_render_pipeline: BlocksRenderPipeline) -> Self {
-        Self {
-            text_page: page,
-            block_render_pipeline,
-            anchor: None,
-            head: None,
-        }
-    }
-
-    fn start_selection(&mut self, pos: winit::dpi::PhysicalPosition<f64>) {
-        // TODO: transform this to page space
-        self.anchor = Some(Point {
-            x: pos.x as f32,
-            y: pos.y as f32,
-        });
-        self.head = None;
-    }
-
-    fn move_cursor(&mut self, cursor: winit::dpi::PhysicalPosition<f64>) {
-        if let None = self.anchor {
-            return;
-        }
-
-        self.head = Some(Point {
-            x: cursor.x as f32,
-            y: cursor.y as f32,
-        });
-    }
-
-    fn compute_quads(&mut self) {
-        self.block_render_pipeline.clear_blocks();
-
-        enum SelectState {
-            SeekStart,
-            SeekEnd,
-        }
-        let mut state = SelectState::SeekStart;
-
-        /*
-        match (self.head.as_ref(), self.anchor.as_ref()) {
-            (Some(head), Some(anchor)) => {
-                for block in self.text_page.blocks() {
-                    for line in block.lines() {
-                        let bounds = line.bounds();
-                        let line_start = bounds.origin();
-                        let x = line_start.x;
-                        let y = line_start.y;
-
-                        for char in line.chars() {
-                            let endpoint =
-                                head.contained_in(char.quad()) && anchor.contained_in(char.quad());
-                            if let SelectState::SeekStart = state && endpoint {
-                                state = SelectState::SeekEnd
-                            } else if let SelectState::SeekEnd = state && endpoint {
-
-                            }
-                        }
-                        self.block_render_pipeline.add_block(Quad {
-                            x,
-                            y,
-                            width: 0.05,
-                            height: 0.05,
-                        });
-                    }
-                }
-            }
-            _ => {}
-        };
-        */
-    }
-
-    fn render<'a>(
-        &'a mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        render_pass: &mut wgpu::RenderPass<'a>,
-        renderer: &QuadRenderer,
-    ) {
-        self.block_render_pipeline
-            .render(device, queue, render_pass, renderer);
-    }
-}
-
 struct PageRenderPipeline {
     texture: Option<wgpu::Texture>,
     render_pipeline: wgpu::RenderPipeline,
@@ -932,7 +841,7 @@ impl Page {
     fn search(&mut self, query: &str) -> Result<usize, mupdf::Error> {
         self.render_pipeline.search_render_pipeline.clear_blocks();
 
-        if query.len() == 0 {
+        if query.is_empty() {
             return Ok(0);
         }
 
@@ -1064,6 +973,8 @@ struct State {
     render_links: bool,
     render_nav_bar: bool,
     show_debug: bool,
+
+    cached_query: String,
 }
 
 impl State {
@@ -1074,7 +985,7 @@ impl State {
         let surface = unsafe { instance.create_surface(window) };
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::default(),
+                power_preference: wgpu::PowerPreference::LowPower,
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
             })
@@ -1119,6 +1030,8 @@ impl State {
             render_links: true,
             render_nav_bar: true,
             show_debug: false,
+
+            cached_query: String::new(),
         }
     }
 
@@ -1318,9 +1231,15 @@ impl State {
     }
 
     fn search(&mut self, query: &str) -> Result<(), mupdf::Error> {
+        if query == self.cached_query {
+            return Ok(());
+        }
+
         for page in self.pages.iter_mut() {
             page.search(query)?;
         }
+        self.cached_query = query.to_string();
+
         Ok(())
     }
 
@@ -1329,6 +1248,8 @@ impl State {
         self.page_count = 0;
     }
 }
+
+const SCROLL_DELTA: f32 = 20.;
 
 fn run() {
     env_logger::init();
@@ -1400,6 +1321,7 @@ fn run() {
         } if window_id == window.id() => {
             if !egui_state.on_event(&mut ctx, &event) {
                 match event {
+                    WindowEvent::CloseRequested => control_flow.set_exit(),
                     WindowEvent::CursorMoved { position, .. } => {
                         if state.hovers_link(*position) {
                             cursor = Some(egui::CursorIcon::PointingHand);
@@ -1410,25 +1332,16 @@ fn run() {
                         }
                         cursor_position = *position;
                     }
-                    WindowEvent::CloseRequested
-                    | WindowEvent::KeyboardInput {
-                        input:
-                            KeyboardInput {
-                                state: ElementState::Pressed,
-                                virtual_keycode: Some(VirtualKeyCode::Escape),
-                                ..
-                            },
-                        ..
-                    } => control_flow.set_exit(),
                     WindowEvent::MouseWheel {
                         delta: winit::event::MouseScrollDelta::LineDelta(xd, yd),
                         ..
                     } => {
-                        state.position.x += 10. * xd;
-                        state.position.y = (state.position.y + 10. * yd).min(0.);
+                        state.position.x += SCROLL_DELTA * xd;
+                        state.position.y = (state.position.y + SCROLL_DELTA * yd).min(0.);
                     }
                     WindowEvent::MouseInput {
                         state: winit::event::ElementState::Pressed,
+                        button: winit::event::MouseButton::Left,
                         ..
                     } => {
                         if let Some(link) = state.find_hovering_link(cursor_position) {
@@ -1537,22 +1450,25 @@ fn run() {
                     });
                 }
                 if state.show_debug {
-                    egui::Window::new("Debug Window").show(&ctx, |ui| {
-                        ui.text_edit_singleline(&mut query);
+                    egui::Window::new("Debug Window")
+                        .open(&mut state.show_debug)
+                        .show(&ctx, |ui| {
+                            ui.text_edit_singleline(&mut query);
 
-                        should_refresh_doc = ui.button("Refresh doc").clicked();
+                            should_refresh_doc = ui.button("Refresh doc").clicked();
 
-                        ui.checkbox(&mut state.render_lines, "Render lines");
-                        ui.checkbox(&mut state.render_blocks, "Render blocks");
-                        ui.checkbox(&mut state.render_links, "Render links");
-                        ui.checkbox(&mut state.render_nav_bar, "Render nav bar");
+                            ui.checkbox(&mut state.render_lines, "Render lines");
+                            ui.checkbox(&mut state.render_blocks, "Render blocks");
+                            ui.checkbox(&mut state.render_links, "Render links");
+                            ui.checkbox(&mut state.render_nav_bar, "Render nav bar");
 
-                        let elapsed = last_render_time.elapsed();
-                        let fps = std::time::Duration::from_secs(1).as_nanos() / elapsed.as_nanos();
-                        ui.label(format!("{:?}", elapsed));
-                        ui.label(format!("{}", fps));
-                        last_render_time = std::time::Instant::now();
-                    });
+                            let elapsed = last_render_time.elapsed();
+                            let fps =
+                                std::time::Duration::from_secs(1).as_nanos() / elapsed.as_nanos();
+                            ui.label(format!("{:?}", elapsed));
+                            ui.label(format!("{}", fps));
+                            last_render_time = std::time::Instant::now();
+                        });
                 }
             });
             if let Some(cursor) = cursor {
