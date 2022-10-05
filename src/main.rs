@@ -1131,7 +1131,7 @@ impl State {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.8,
+                            r: 1.0,
                             g: 1.0,
                             b: 1.0,
                             a: 1.0,
@@ -1262,7 +1262,7 @@ fn run() {
         Err::<(), &str>("Please provide the file name").unwrap();
     }
     let filename = args.last().take().unwrap().to_string();
-    let prettyname = {
+    let mut prettyname = {
         let path = std::path::Path::new(&filename);
         String::from(path.file_name().unwrap().to_str().unwrap())
     };
@@ -1313,6 +1313,9 @@ fn run() {
 
     let mut last_render_time = std::time::Instant::now();
     let mut query = String::new();
+
+    let mut outlines = doc.outlines().unwrap();
+    let mut show_table_of_content = false;
 
     event_loop.run(move |event, _, control_flow| match event {
         Event::WindowEvent {
@@ -1370,6 +1373,7 @@ fn run() {
                                         | VirtualKeyCode::Down
                                         | VirtualKeyCode::D
                                         | VirtualKeyCode::R
+                                        | VirtualKeyCode::T
                                         | VirtualKeyCode::Slash),
                                     ),
                                 ..
@@ -1393,7 +1397,11 @@ fn run() {
                         }
                         VirtualKeyCode::R => {
                             doc = mupdf::Document::open(&filename).unwrap();
+                            outlines = doc.outlines().unwrap();
                             state.rerender_document(&doc).unwrap();
+                        }
+                        VirtualKeyCode::T => {
+                            show_table_of_content = !show_table_of_content;
                         }
                         VirtualKeyCode::Slash => {
                             bar.toggle_shown();
@@ -1449,6 +1457,19 @@ fn run() {
                         });
                     });
                 }
+
+                egui::Window::new("Table of Content")
+                    .open(&mut show_table_of_content)
+                    .show(&ctx, |ui| {
+                        for outline in &outlines {
+                            egui::CollapsingHeader::new(&outline.title).show(ui, |ui| {
+                                for outline in &outline.down {
+                                    ui.label(&outline.title);
+                                }
+                            });
+                        }
+                    });
+
                 if state.show_debug {
                     egui::Window::new("Debug Window")
                         .open(&mut state.show_debug)
@@ -1485,12 +1506,16 @@ fn run() {
 
             if should_refresh_doc || bar.has_file_to_open() {
                 let filename = if bar.has_file_to_open() {
-                    bar.file_to_open().unwrap().to_str().unwrap().to_string()
+                    let path = bar.file_to_open().unwrap();
+                    prettyname = path.file_name().unwrap().to_str().unwrap().to_string();
+
+                    path.to_str().unwrap().to_string()
                 } else {
                     filename.to_string()
                 };
 
                 doc = mupdf::Document::open(&filename).unwrap();
+                outlines = doc.outlines().unwrap();
                 state.rerender_document(&doc).unwrap();
             }
 
