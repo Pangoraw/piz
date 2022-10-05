@@ -113,10 +113,6 @@ impl SearchWindow {
     }
 
     pub fn render(&mut self, ctx: &egui::Context) {
-        if !self.shown {
-            return;
-        }
-
         egui::Window::new("Zotero Search")
             .open(&mut self.shown)
             .show(ctx, |ui| {

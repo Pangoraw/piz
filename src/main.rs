@@ -772,7 +772,7 @@ impl RenderedPage {
         let display_list = page.to_display_list(false)?;
         let textpage = display_list.to_text_page(mupdf::TextPageOptions::BLOCK_TEXT)?;
 
-        // TODO: Create pixmap with right size
+        // TODO: Create pixmap with right size right away.
         let mat = mupdf::Matrix::new_scale(1., 1.);
         let pixmap = display_list.to_pixmap(&mat, &mupdf::Colorspace::device_rgb(), true)?;
 
@@ -1131,9 +1131,9 @@ impl State {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 1.0,
-                            g: 1.0,
-                            b: 1.0,
+                            r: 238. / 255., // Solarized: base1 RGBA(238, 232, 213, 1)
+                            g: 232. / 255., // Solarized: base2 RGBA(253, 246, 227, 1)
+                            b: 213. / 255.,
                             a: 1.0,
                         }),
                         store: true,
@@ -1300,7 +1300,7 @@ fn run() {
     let texture_format = match std::env::var("HOSTNAME") {
         Err(_) => wgpu::TextureFormat::Rgba8UnormSrgb,
         Ok(s) => match s.as_str() {
-            "grapefruit" => wgpu::TextureFormat::Bgra8UnormSrgb,
+            "grapefruit" | "pc-mna-206" => wgpu::TextureFormat::Bgra8UnormSrgb,
             _ => wgpu::TextureFormat::Rgba8UnormSrgb,
         },
     };
@@ -1326,6 +1326,7 @@ fn run() {
                 match event {
                     WindowEvent::CloseRequested => control_flow.set_exit(),
                     WindowEvent::CursorMoved { position, .. } => {
+                        // TODO: Recompute this based on scrolling too.
                         if state.hovers_link(*position) {
                             cursor = Some(egui::CursorIcon::PointingHand);
                         } else if state.hovers_line(*position) {
@@ -1423,7 +1424,6 @@ fn run() {
 
             let mut should_refresh_doc = false;
             let mut output = ctx.run(egui_state.take_egui_input(&window), |ctx| {
-                bar.render(ctx);
                 if state.render_nav_bar {
                     egui::TopBottomPanel::bottom("bottom_panel").show(&ctx, |ui| {
                         ui.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
@@ -1458,6 +1458,8 @@ fn run() {
                     });
                 }
 
+                bar.render(ctx);
+
                 egui::Window::new("Table of Content")
                     .open(&mut show_table_of_content)
                     .show(&ctx, |ui| {
@@ -1470,27 +1472,24 @@ fn run() {
                         }
                     });
 
-                if state.show_debug {
-                    egui::Window::new("Debug Window")
-                        .open(&mut state.show_debug)
-                        .show(&ctx, |ui| {
-                            ui.text_edit_singleline(&mut query);
+                egui::Window::new("Debug Window")
+                    .open(&mut state.show_debug)
+                    .show(&ctx, |ui| {
+                        ui.text_edit_singleline(&mut query);
 
-                            should_refresh_doc = ui.button("Refresh doc").clicked();
+                        should_refresh_doc = ui.button("Refresh doc").clicked();
 
-                            ui.checkbox(&mut state.render_lines, "Render lines");
-                            ui.checkbox(&mut state.render_blocks, "Render blocks");
-                            ui.checkbox(&mut state.render_links, "Render links");
-                            ui.checkbox(&mut state.render_nav_bar, "Render nav bar");
+                        ui.checkbox(&mut state.render_lines, "Render lines");
+                        ui.checkbox(&mut state.render_blocks, "Render blocks");
+                        ui.checkbox(&mut state.render_links, "Render links");
+                        ui.checkbox(&mut state.render_nav_bar, "Render nav bar");
 
-                            let elapsed = last_render_time.elapsed();
-                            let fps =
-                                std::time::Duration::from_secs(1).as_nanos() / elapsed.as_nanos();
-                            ui.label(format!("{:?}", elapsed));
-                            ui.label(format!("{}", fps));
-                            last_render_time = std::time::Instant::now();
-                        });
-                }
+                        let elapsed = last_render_time.elapsed();
+                        let fps = std::time::Duration::from_secs(1).as_nanos() / elapsed.as_nanos();
+                        ui.monospace(format!("{:?}", elapsed));
+                        ui.monospace(format!("{}fps", fps));
+                        last_render_time = std::time::Instant::now();
+                    });
             });
             if let Some(cursor) = cursor {
                 if !ctx.is_pointer_over_area() {
