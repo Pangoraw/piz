@@ -956,6 +956,7 @@ impl Page {
 }
 
 struct State {
+    adapter: wgpu::Adapter,
     surface: wgpu::Surface,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -1014,6 +1015,7 @@ impl State {
         let shader = device.create_shader_module(include_wgsl!("shader.wgsl"));
 
         Self {
+            adapter,
             surface,
             device,
             queue,
@@ -1295,15 +1297,7 @@ fn run() {
     let mut egui_state = egui_winit::State::new(&event_loop);
     let mut ctx = egui::Context::default();
 
-    // I have no idea why the expected texture format is different depending on the device 🤔
-    // TODO: look at how egui_winit does it in a managed way
-    let texture_format = match std::env::var("HOSTNAME") {
-        Err(_) => wgpu::TextureFormat::Rgba8UnormSrgb,
-        Ok(s) => match s.as_str() {
-            "grapefruit" | "pc-mna-206" => wgpu::TextureFormat::Bgra8UnormSrgb,
-            _ => wgpu::TextureFormat::Rgba8UnormSrgb,
-        },
-    };
+    let texture_format = state.surface.get_supported_formats(&state.adapter)[0];
     let mut rp = egui_wgpu::renderer::RenderPass::new(&state.device, texture_format, 1);
 
     let mut bar = search_bar::SearchWindow::default();
