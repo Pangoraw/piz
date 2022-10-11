@@ -450,6 +450,7 @@ struct PageRenderPipeline {
     block_render_pipeline: BlocksRenderPipeline,
     line_render_pipeline: BlocksRenderPipeline,
     link_render_pipeline: BlocksRenderPipeline,
+    link_target_render_pipeline: BlocksRenderPipeline,
     search_render_pipeline: BlocksRenderPipeline,
 }
 
@@ -543,6 +544,7 @@ impl PageRenderPipeline {
         let block_render_pipeline = BlocksRenderPipeline::new(&device, 0, &config, &shader);
         let line_render_pipeline = BlocksRenderPipeline::new(&device, 0, &config, &shader);
         let link_render_pipeline = BlocksRenderPipeline::new(&device, 0, &config, &shader);
+        let link_target_render_pipeline = BlocksRenderPipeline::new(&device, 0, &config, &shader);
         let search_render_pipeline = BlocksRenderPipeline::new(&device, 0, &config, &shader);
 
         let page_render_pipeline = PageRenderPipeline {
@@ -559,6 +561,7 @@ impl PageRenderPipeline {
             block_render_pipeline,
             line_render_pipeline,
             link_render_pipeline,
+            link_target_render_pipeline,
             search_render_pipeline,
         };
 
@@ -887,6 +890,58 @@ impl Page {
         }
     }
 
+    fn find_matching_reference(&self, text: &str) -> Option<String> {
+        for block in self.page.textpage.blocks() {
+            for line in block.lines() {
+                let line_text = line.chars().filter_map(|c| c.char()).collect::<String>();
+                if line_text.contains(text) {
+                    return Some(line_text);
+                }
+            }
+        }
+        None
+    }
+
+    fn find_link_text(&self, point: &Point) -> Option<String> {
+        let link = self.find_hovering_link(point)?;
+
+        let page_bounds = self.page.page.bounds().ok()?;
+        let block = self.page.textpage.blocks().find(|block| {
+            let rect = block.bounds();
+            let quad = Quad {
+                x: rect.x0 / page_bounds.width(),
+                y: rect.y0 / page_bounds.height(),
+                width: (rect.x1 - rect.x0) / page_bounds.width(),
+                height: (rect.y1 - rect.y0) / page_bounds.height(),
+            };
+            point.contained_in(&quad)
+        })?;
+
+        let line = block.lines().find(|line| {
+            let rect = line.bounds();
+            let quad = Quad {
+                x: rect.x0 / page_bounds.width(),
+                y: rect.y0 / page_bounds.height(),
+                width: (rect.x1 - rect.x0) / page_bounds.width(),
+                height: (rect.y1 - rect.y0) / page_bounds.height(),
+            };
+            point.contained_in(&quad)
+        })?;
+
+        let link_bound = link.bounds;
+        let mut chars: Vec<char> = Vec::new();
+        for char in line.chars() {
+            let char_bound = char.quad();
+            let char_area =
+                (char_bound.ur.x - char_bound.ul.x) * (char_bound.ll.y - char_bound.ul.y);
+            if intersection_area(&link_bound, &char_bound) > 0.8 * char_area {
+                chars.push(char.char()?);
+            }
+        }
+
+        Some(chars.iter().collect::<String>())
+    }
+
     fn width(&self) -> Result<f32, mupdf::Error> {
         let rect = self.page.page.bounds()?;
         Ok(rect.width())
@@ -952,6 +1007,19 @@ impl Page {
 
     fn is_visible(&self) -> bool {
         self.render_pipeline.is_visible()
+    }
+}
+
+fn intersection_area(a: &mupdf::Rect, b: &mupdf::Quad) -> f32 {
+    let x0 = a.x0.max(b.ul.x);
+    let x1 = a.x1.min(b.ur.x);
+    let y0 = a.y0.max(b.ul.y);
+    let y1 = a.y1.min(b.ll.y);
+
+    if x1 > x0 && y1 > y0 {
+        (x1 - x0) * (y1 - y0)
+    } else {
+        0.
     }
 }
 
@@ -1192,11 +1260,28 @@ impl State {
             let point = page.render_pipeline.from_pos_to_page(pos);
 
             match page.find_hovering_link(&point) {
-                opt @ Some(_) => return opt,
+                opt @ Some(_) => {
+                    let line = page.find_link_text(&point).unwrap();
+                    dbg!(line);
+
+                    return opt;
+                }
                 None => continue,
             }
         }
         None
+    }
+
+    fn load_until(
+        &mut self,
+        doc: &mupdf::Document,
+        page_number: usize,
+    ) -> Result<(), mupdf::Error> {
+        // Add missing pages
+        while self.pages.len() <= page_number {
+            self.add_page(doc, self.pages.len() as i32)?;
+        }
+        Ok(())
     }
 
     fn navigate_to(
@@ -1208,10 +1293,7 @@ impl State {
             return Ok(());
         }
 
-        // Add missing pages
-        while self.pages.len() <= page_number {
-            self.add_page(doc, self.pages.len() as i32)?;
-        }
+        self.load_until(doc, page_number)?;
 
         self.position.y = 0.;
         for page in self.pages.iter().take(page_number) {
@@ -1339,16 +1421,33 @@ fn run() {
                     }
                     WindowEvent::MouseInput {
                         state: winit::event::ElementState::Pressed,
-                        button: winit::event::MouseButton::Left,
+                        button,
                         ..
                     } => {
                         if let Some(link) = state.find_hovering_link(cursor_position) {
                             if let Some(uri) = link.uri.strip_prefix("#page=") {
-                                if let Some((page_number, _)) = uri.split_once('&') {
+                                if let Some((page_number, _pos)) = uri.split_once('&') {
                                     let page_number =
                                         usize::from_str_radix(page_number, 10).unwrap() - 1;
                                     if page_number < doc.page_count().unwrap() as usize {
-                                        state.navigate_to(&doc, page_number).unwrap();
+                                        if let winit::event::MouseButton::Left = button {
+                                            state.navigate_to(&doc, page_number).unwrap();
+                                        } else {
+                                            state.load_until(&doc, page_number).unwrap();
+                                            let link_text = state
+                                                .pages
+                                                .iter()
+                                                .find_map(|page| {
+                                                    let pos = page
+                                                        .render_pipeline
+                                                        .from_pos_to_page(cursor_position);
+                                                    page.find_link_text(&pos)
+                                                })
+                                                .unwrap();
+                                            let link_ref = state.pages[page_number]
+                                                .find_matching_reference(&link_text);
+                                            dbg!(link_text, link_ref);
+                                        }
                                     }
                                 }
                             } else {
