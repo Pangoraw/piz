@@ -893,11 +893,17 @@ impl Page {
     fn find_matching_reference(&self, text: &str) -> Option<String> {
         for block in self.page.textpage.blocks() {
             let mut block_match = false;
-            let content = block
+            let content: Vec<String> = block
                 .lines()
-                .map(|line| {
+                .enumerate()
+                .map(|(i, line)| {
                     let line_text = line.chars().filter_map(|c| c.char()).collect::<String>();
-                    if line_text.contains(text) {
+                    if i == 0 // TODO: Improve
+                        && line_text.starts_with('[')
+                        && line_text.starts_with(&format!("[{}]", text))
+                    {
+                        block_match = true;
+                    } else if i == 0 && line_text.contains(&format!("{}.", text)) {
                         block_match = true;
                     }
                     line_text
@@ -905,7 +911,7 @@ impl Page {
                 .collect();
 
             if block_match {
-                return Some(content);
+                return Some(content.join(" "));
             }
         }
         None
@@ -917,7 +923,7 @@ impl Page {
         // Whether or not to include brackets "1" => "[1]" to more easily
         // match refs in the bibliography.
         // TODO: Also handle YEAR citation style with link uri.
-        const ADD_BRACKETS: bool = true;
+        const ADD_BRACKETS: bool = false;
 
         let link = self.find_hovering_link(point)?;
 
