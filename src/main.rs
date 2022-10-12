@@ -892,17 +892,33 @@ impl Page {
 
     fn find_matching_reference(&self, text: &str) -> Option<String> {
         for block in self.page.textpage.blocks() {
-            for line in block.lines() {
-                let line_text = line.chars().filter_map(|c| c.char()).collect::<String>();
-                if line_text.contains(text) {
-                    return Some(line_text);
-                }
+            let mut block_match = false;
+            let content = block
+                .lines()
+                .map(|line| {
+                    let line_text = line.chars().filter_map(|c| c.char()).collect::<String>();
+                    if line_text.contains(text) {
+                        block_match = true;
+                    }
+                    line_text
+                })
+                .collect();
+
+            if block_match {
+                return Some(content);
             }
         }
         None
     }
 
     fn find_link_text(&self, point: &Point) -> Option<String> {
+        // The minimum relative intersection to include the char in the link
+        const MATCH_RATIO: f32 = 0.5;
+        // Whether or not to include brackets "1" => "[1]" to more easily
+        // match refs in the bibliography.
+        // TODO: Also handle YEAR citation style with link uri.
+        const ADD_BRACKETS: bool = true;
+
         let link = self.find_hovering_link(point)?;
 
         let page_bounds = self.page.page.bounds().ok()?;
@@ -934,9 +950,20 @@ impl Page {
             let char_bound = char.quad();
             let char_area =
                 (char_bound.ur.x - char_bound.ul.x) * (char_bound.ll.y - char_bound.ul.y);
-            if intersection_area(&link_bound, &char_bound) > 0.8 * char_area {
-                chars.push(char.char()?);
+
+            if intersection_area(&link_bound, &char_bound) >= MATCH_RATIO * char_area {
+                let c = char.char()?;
+
+                if ADD_BRACKETS && chars.is_empty() && c != '[' {
+                    chars.push('[');
+                }
+
+                chars.push(c);
             }
+        }
+        if let Some(']') = chars.last() {
+        } else if ADD_BRACKETS {
+            chars.push(']');
         }
 
         Some(chars.iter().collect::<String>())
@@ -1258,12 +1285,8 @@ impl State {
     fn find_hovering_link(&self, pos: winit::dpi::PhysicalPosition<f64>) -> Option<mupdf::Link> {
         for page in self.pages.iter().filter(|page| page.is_visible()) {
             let point = page.render_pipeline.from_pos_to_page(pos);
-
             match page.find_hovering_link(&point) {
                 opt @ Some(_) => {
-                    let line = page.find_link_text(&point).unwrap();
-                    dbg!(line);
-
                     return opt;
                 }
                 None => continue,
@@ -1393,6 +1416,8 @@ fn run() {
     let mut outlines = doc.outlines().unwrap();
     let mut show_table_of_content = false;
 
+    let mut current_ref: Option<(winit::dpi::PhysicalPosition<f64>, String)> = None;
+
     event_loop.run(move |event, _, control_flow| match event {
         Event::WindowEvent {
             ref event,
@@ -1410,6 +1435,7 @@ fn run() {
                         } else {
                             cursor = None;
                         }
+                        current_ref = None;
                         cursor_position = *position;
                     }
                     WindowEvent::MouseWheel {
@@ -1434,19 +1460,37 @@ fn run() {
                                             state.navigate_to(&doc, page_number).unwrap();
                                         } else {
                                             state.load_until(&doc, page_number).unwrap();
-                                            let link_text = state
-                                                .pages
-                                                .iter()
-                                                .find_map(|page| {
-                                                    let pos = page
-                                                        .render_pipeline
-                                                        .from_pos_to_page(cursor_position);
-                                                    page.find_link_text(&pos)
-                                                })
-                                                .unwrap();
-                                            let link_ref = state.pages[page_number]
-                                                .find_matching_reference(&link_text);
-                                            dbg!(link_text, link_ref);
+                                            let link_text = state.pages.iter().find_map(|page| {
+                                                let pos = page
+                                                    .render_pipeline
+                                                    .from_pos_to_page(cursor_position);
+                                                match page.find_link_text(&pos) {
+                                                    Some(s) => {
+                                                        if s.is_empty() {
+                                                            None
+                                                        } else {
+                                                            Some(s)
+                                                        }
+                                                    }
+                                                    _ => None,
+                                                }
+                                            });
+                                            if let Some(link_text) = link_text {
+                                                match state.pages[page_number]
+                                                    .find_matching_reference(&link_text)
+                                                {
+                                                    Some(ref_text) => {
+                                                        current_ref = Some((
+                                                            winit::dpi::PhysicalPosition::new(
+                                                                cursor_position.x,
+                                                                cursor_position.y + 10.,
+                                                            ),
+                                                            ref_text,
+                                                        ))
+                                                    }
+                                                    _ => {}
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -1517,6 +1561,16 @@ fn run() {
 
             let mut should_refresh_doc = false;
             let mut output = ctx.run(egui_state.take_egui_input(&window), |ctx| {
+                if let Some((pos, ref_text)) = &current_ref {
+                    egui::Window::new("Ref")
+                        .anchor(egui::Align2::LEFT_TOP, egui::vec2(pos.x as _, pos.y as _))
+                        .title_bar(false)
+                        .collapsible(false)
+                        .show(&ctx, |ui| {
+                            ui.label(ref_text);
+                        });
+                }
+
                 if state.render_nav_bar {
                     egui::TopBottomPanel::bottom("bottom_panel").show(&ctx, |ui| {
                         ui.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
