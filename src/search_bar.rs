@@ -8,15 +8,14 @@ struct ZoteroFile {
 }
 
 impl ZoteroFile {
-    fn path(&self) -> PathBuf {
-        PathBuf::from(zotero_path())
-            .join("storage")
-            .join(&self.key)
-            .join(&self.path)
+    fn path(&self, zotero_path: &PathBuf) -> PathBuf {
+        zotero_path.join("storage").join(&self.key).join(&self.path)
     }
 }
 
 pub struct SearchWindow {
+    zotero_path: PathBuf,
+
     shown: bool,
     was_just_shown: bool,
     query: String,
@@ -26,27 +25,13 @@ pub struct SearchWindow {
     currently_selected: Option<usize>,
 }
 
-fn zotero_path() -> PathBuf {
-    match std::env::var("HOSTNAME") {
-        Ok(s) => match s.as_str() {
-            "grapefruit" => home::home_dir().unwrap().join("Zotero"),
-            _ => home::home_dir()
-                .unwrap()
-                .join("snap/zotero-snap/common/Zotero"),
-        },
-        _ => home::home_dir()
-            .unwrap()
-            .join("snap/zotero-snap/common/Zotero"),
-    }
-}
-
-impl Default for SearchWindow {
-    fn default() -> Self {
+impl SearchWindow {
+    pub fn with_path(zotero_path: PathBuf) -> Option<Self> {
         let connection = sqlite::Connection::open_with_flags(
-            zotero_path().join("zotero.sqlite"),
+            zotero_path.join("zotero.sqlite"),
             sqlite::OpenFlags::new().set_read_only(),
         )
-        .unwrap();
+        .ok()?;
 
         let cursor = connection
             .prepare(
@@ -63,7 +48,7 @@ impl Default for SearchWindow {
             AND itemAttachments.contentType = 'application/pdf';
         "#,
             )
-            .unwrap()
+            .ok()?
             .into_cursor();
 
         let results: Vec<ZoteroFile> = cursor
@@ -73,12 +58,11 @@ impl Default for SearchWindow {
                         title: row.get(0),
                         path: row
                             .get::<String, _>(1)
-                            .strip_prefix("storage:")
-                            .unwrap()
+                            .strip_prefix("storage:")?
                             .to_string(),
                         key: row.get(2),
                     };
-                    if file.path().exists() {
+                    if file.path(&zotero_path).exists() {
                         Some(file)
                     } else {
                         None
@@ -88,18 +72,17 @@ impl Default for SearchWindow {
             })
             .collect();
 
-        Self {
+        Some(Self {
+            zotero_path,
             shown: false,
             was_just_shown: false,
             query: String::new(),
             results,
             should_open_file: None,
             currently_selected: None,
-        }
+        })
     }
-}
 
-impl SearchWindow {
     pub fn has_file_to_open(&self) -> bool {
         self.should_open_file.is_some()
     }
@@ -107,7 +90,7 @@ impl SearchWindow {
     pub fn file_to_open(&mut self) -> Option<PathBuf> {
         let res = self
             .should_open_file
-            .map(|index| self.results[index].path());
+            .map(|index| self.results[index].path(&self.zotero_path));
         self.should_open_file = None;
         res
     }

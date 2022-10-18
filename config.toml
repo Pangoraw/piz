@@ -1,0 +1,9 @@
+# Hello world
+
+background_color = [
+ 0.93,
+ 0.91,
+ 0.84,
+ 1.0,
+]
+zotero_dir = "/home/pberg/snap/zotero-snap/common/Zotero/"

@@ -6,6 +6,7 @@ use egui_winit::winit::{
 };
 use wgpu::{include_wgsl, util::DeviceExt};
 
+mod config;
 mod search_bar;
 
 #[repr(C)]
@@ -900,7 +901,7 @@ impl Page {
                     let line_text = line.chars().filter_map(|c| c.char()).collect::<String>();
                     if i == 0 // TODO: Improve
                         && line_text.starts_with('[')
-                        && line_text.starts_with(&format!("[{}]", text))
+                        && line_text.starts_with(&if text.starts_with('[') && text.ends_with(']'){ text.to_string() } else { format!("[{}]", text)})
                     {
                         block_match = true;
                     } else if i == 0 && line_text.contains(&format!("{}.", text)) {
@@ -1077,6 +1078,7 @@ struct State {
     show_debug: bool,
 
     cached_query: String,
+    background_color: wgpu::Color,
 }
 
 impl State {
@@ -1134,6 +1136,12 @@ impl State {
             render_nav_bar: true,
             show_debug: false,
 
+            background_color: wgpu::Color {
+                r: 1.0, // Solarized: base1 RGBA(238, 232, 213, 1)
+                g: 1.0, // Solarized: base2 RGBA(253, 246, 227, 1)
+                b: 1.0,
+                a: 1.0,
+            },
             cached_query: String::new(),
         }
     }
@@ -1233,12 +1241,7 @@ impl State {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 238. / 255., // Solarized: base1 RGBA(238, 232, 213, 1)
-                            g: 232. / 255., // Solarized: base2 RGBA(253, 246, 227, 1)
-                            b: 213. / 255.,
-                            a: 1.0,
-                        }),
+                        load: wgpu::LoadOp::Clear(self.background_color),
                         store: true,
                     },
                 })],
@@ -1367,8 +1370,11 @@ const SCROLL_DELTA: f32 = 20.;
 fn run() {
     env_logger::init();
 
+    let path = std::env::current_exe().unwrap();
+    let repo_dir = path.parent().unwrap().parent().unwrap().parent().unwrap();
+
+    let config = config::Config::from_file(repo_dir.join("config.toml").into()).unwrap();
     let args: Vec<String> = std::env::args().collect();
-    tracing::debug!("args = {:?}", &args);
 
     let exe_name = &args[0];
     if args.len() != 2 {
@@ -1405,13 +1411,23 @@ fn run() {
     state.add_page(&doc, 0).unwrap();
     state.add_page(&doc, 1).unwrap();
 
+    state.background_color = wgpu::Color {
+        r: config.background_color.0,
+        g: config.background_color.1,
+        b: config.background_color.2,
+        a: config.background_color.3,
+    };
+
     let mut egui_state = egui_winit::State::new(&event_loop);
     let mut ctx = egui::Context::default();
 
     let texture_format = state.surface.get_supported_formats(&state.adapter)[0];
     let mut rp = egui_wgpu::renderer::RenderPass::new(&state.device, texture_format, 1);
 
-    let mut bar = search_bar::SearchWindow::default();
+    let mut bar = match config.zotero_dir {
+        Some(zotero_dir) => search_bar::SearchWindow::with_path(zotero_dir),
+        None => None,
+    };
 
     let mut cursor: Option<egui::CursorIcon> = None;
     let mut cursor_position = winit::dpi::PhysicalPosition { x: 0., y: 0. };
@@ -1548,7 +1564,9 @@ fn run() {
                             show_table_of_content = !show_table_of_content;
                         }
                         VirtualKeyCode::Slash => {
-                            bar.toggle_shown();
+                            if let Some(bar) = bar.as_mut() {
+                                bar.toggle_shown();
+                            }
                         }
                         _ => {}
                     },
@@ -1611,7 +1629,9 @@ fn run() {
                     });
                 }
 
-                bar.render(ctx);
+                if let Some(bar) = bar.as_mut() {
+                    bar.render(ctx);
+                }
 
                 egui::Window::new("Table of Content")
                     .open(&mut show_table_of_content)
@@ -1656,19 +1676,21 @@ fn run() {
                 control_flow.set_wait()
             }
 
-            if should_refresh_doc || bar.has_file_to_open() {
-                let filename = if bar.has_file_to_open() {
-                    let path = bar.file_to_open().unwrap();
-                    prettyname = path.file_name().unwrap().to_str().unwrap().to_string();
+            if let Some(bar) = bar.as_mut() {
+                if should_refresh_doc || bar.has_file_to_open() {
+                    let filename = if bar.has_file_to_open() {
+                        let path = bar.file_to_open().unwrap();
+                        prettyname = path.file_name().unwrap().to_str().unwrap().to_string();
 
-                    path.to_str().unwrap().to_string()
-                } else {
-                    filename.to_string()
-                };
+                        path.to_str().unwrap().to_string()
+                    } else {
+                        filename.to_string()
+                    };
 
-                doc = mupdf::Document::open(&filename).unwrap();
-                outlines = doc.outlines().unwrap();
-                state.rerender_document(&doc).unwrap();
+                    doc = mupdf::Document::open(&filename).unwrap();
+                    outlines = doc.outlines().unwrap();
+                    state.rerender_document(&doc).unwrap();
+                }
             }
 
             let primitives = ctx.tessellate(output.shapes);
