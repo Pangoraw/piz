@@ -894,7 +894,7 @@ impl Page {
     // This tries very hard to find a block on the link target page that matches
     // the text given some heuristics with common citation styles ("et al.", "Foo and Bar",...)
     // TODO: this should also search inside the link target bounding box.
-    fn find_matching_reference(&self, text: &str) -> Option<String> {
+    fn find_matching_reference(&self, text: &str, x: f32, y: f32) -> Option<String> {
         let is_probably_title = text.len() == 1 && matches!(text.chars().next(), Some('A'..='Z'));
 
         let text = text.strip_suffix(" et al.").unwrap_or(text);
@@ -908,6 +908,11 @@ impl Page {
         }
 
         for block in self.page.textpage.blocks() {
+            let bounds = block.bounds();
+            if bounds.y0 <= y {
+                continue;
+            }
+
             let mut block_match = false;
             let content: Vec<String> = block
                 .lines()
@@ -924,9 +929,13 @@ impl Page {
                         && line_text.starts_with(&if text.starts_with('[') && text.ends_with(']'){ text.to_string() } else { format!("[{}]", text)})
                     {
                         block_match = true;
-                    } else if all_numerics(text) && text.len() == 4 && line_text.contains(&format!("{}.", text)) {
-                        // This is a year like 2012, this one is probably not great
-                        block_match = true;
+                    } else if all_numerics(text) {
+                        if text.len() == 4 && line_text.contains(&format!("{}.", text)) {
+                            // This is a year like 2012, this one is probably not great
+                            block_match = true;
+                        } else if text.len() <= 3 && line_text.starts_with(&format!("{}.",text)) {
+                            block_match = true;
+                        }
                     } else if !all_numerics(text) && line_text.contains(text) {
                         // last hope :(
                         block_match = true;
@@ -935,7 +944,7 @@ impl Page {
                 })
                 .collect();
 
-            if block_match {
+            if block_match && content.len() < 5 {
                 return Some(content.join(" "));
             }
         }
@@ -1473,44 +1482,35 @@ fn run() {
                 match event {
                     WindowEvent::CloseRequested => control_flow.set_exit(),
                     WindowEvent::CursorMoved { position, .. } => {
-                        // TODO: Recompute this based on scrolling too.
+                        // TODO: Recompute page position based on scrolling too.
                         if let Some(link) = state.find_hovering_link(*position) {
-                            if let Some(uri) = link.uri.strip_prefix("#page=") {
-                                if let Some((page_number, _pos)) = uri.split_once('&') {
-                                    let page_number =
-                                        usize::from_str_radix(page_number, 10).unwrap() - 1;
-                                    if page_number < doc.page_count().unwrap() as usize {
-                                        state.load_until(&doc, page_number).unwrap();
-                                        let link_text = state.pages.iter().find_map(|page| {
-                                            let pos = page
-                                                .render_pipeline
-                                                .from_pos_to_page(cursor_position);
-                                            match page.find_link_text(&pos) {
-                                                Some(s) => {
-                                                    if s.is_empty() {
-                                                        None
-                                                    } else {
-                                                        Some(s)
-                                                    }
-                                                }
-                                                _ => None,
+                            if let Some(dest) = link.dest {
+                                let page_number = dest.location.page as usize;
+                                if page_number < doc.page_count().unwrap() as usize {
+                                    state.load_until(&doc, page_number).unwrap();
+
+                                    let link_text = state.pages.iter().find_map(|page| {
+                                        let pos =
+                                            page.render_pipeline.from_pos_to_page(cursor_position);
+                                        match page.find_link_text(&pos) {
+                                            Some(s) if !s.is_empty() => Some(s),
+                                            _ => None,
+                                        }
+                                    });
+                                    if let Some(link_text) = link_text {
+                                        match state.pages[page_number]
+                                            .find_matching_reference(&link_text, dest.x, dest.y)
+                                        {
+                                            Some(ref_text) => {
+                                                current_ref = Some((
+                                                    winit::dpi::PhysicalPosition::new(
+                                                        position.x,
+                                                        position.y + 10.,
+                                                    ),
+                                                    ref_text,
+                                                ))
                                             }
-                                        });
-                                        if let Some(link_text) = link_text {
-                                            match state.pages[page_number]
-                                                .find_matching_reference(&link_text)
-                                            {
-                                                Some(ref_text) => {
-                                                    current_ref = Some((
-                                                        winit::dpi::PhysicalPosition::new(
-                                                            position.x,
-                                                            position.y + 10.,
-                                                        ),
-                                                        ref_text,
-                                                    ))
-                                                }
-                                                _ => {}
-                                            }
+                                            _ => {}
                                         }
                                     }
                                 }
@@ -1534,17 +1534,39 @@ fn run() {
                     }
                     WindowEvent::MouseInput {
                         state: winit::event::ElementState::Pressed,
-                        button: winit::event::MouseButton::Left,
+                        button:
+                            button
+                            @ (winit::event::MouseButton::Left | winit::event::MouseButton::Right),
                         ..
                     } => {
                         if let Some(link) = state.find_hovering_link(cursor_position) {
-                            if let Some(uri) = link.uri.strip_prefix("#page=") {
-                                if let Some((page_number, _pos)) = uri.split_once('&') {
-                                    let page_number =
-                                        usize::from_str_radix(page_number, 10).unwrap() - 1;
-                                    if page_number < doc.page_count().unwrap() as usize {
-                                        state.navigate_to(&doc, page_number).unwrap();
-                                    }
+                            if let Some(dest) = link.dest {
+                                let page_number = dest.location.page as usize;
+                                if page_number < doc.page_count().unwrap() as usize
+                                    && matches!(button, winit::event::MouseButton::Left)
+                                {
+                                    state.navigate_to(&doc, page_number).unwrap();
+                                } else if let Some(link_text) =
+                                    state.pages.iter().find_map(|page| {
+                                        if !page.is_visible() {
+                                            return None;
+                                        }
+
+                                        let pos =
+                                            page.render_pipeline.from_pos_to_page(cursor_position);
+                                        match page.find_link_text(&pos) {
+                                            Some(s) if !s.is_empty() => Some(s),
+                                            _ => None,
+                                        }
+                                    })
+                                {
+                                    current_ref = Some((
+                                        winit::dpi::PhysicalPosition::new(
+                                            cursor_position.x,
+                                            cursor_position.y + 10.,
+                                        ),
+                                        link_text,
+                                    ));
                                 }
                             } else {
                                 webbrowser::open(&link.uri).unwrap();
@@ -1616,13 +1638,19 @@ fn run() {
             let mut should_refresh_doc = false;
             let mut output = ctx.run(egui_state.take_egui_input(&window), |ctx| {
                 if let Some((pos, ref_text)) = &current_ref {
+                    let win_width = window.inner_size().width;
+                    let (alignment, x) = if pos.x as u32 > win_width / 2 {
+                        (egui::Align2::RIGHT_TOP,pos.x as f32 - win_width as f32 )
+                    } else {
+                        (egui::Align2::LEFT_TOP, pos.x as f32)
+                    };
                     egui::Window::new("Ref")
-                        .anchor(egui::Align2::LEFT_TOP, egui::vec2(pos.x as _, pos.y as _))
+                        .anchor(alignment, egui::vec2(x, pos.y as _))
                         .title_bar(false)
                         .collapsible(false)
                         .resizable(false)
                         .show(&ctx, |ui| {
-                            ui.label(ref_text);
+                            ui.monospace(ref_text);
                         });
                 }
 

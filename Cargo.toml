@@ -9,7 +9,7 @@ edition = "2021"
 home = "0.5.3"
 tracing = "0.1"
 tracing-subscriber = "0.2"
-mupdf = { version = "0.4", default-features = false }
+mupdf = { path = "../mupdf-rs", default-features = false } # { version = "0.4", default-features = false }
 wgpu = "0.13"
 env_logger = "0.9"
 log = "0.4"

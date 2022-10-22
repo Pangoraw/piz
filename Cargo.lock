@@ -143,9 +143,9 @@ checksum = "d468802bab17cbc0cc575e9b053f41e72aa36bfa6b7f55e3529ffa43161b97fa"
 
 [[package]]
 name = "bindgen"
-version = "0.60.1"
+version = "0.61.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "062dddbc1ba4aca46de6338e2bf87771414c335f7b2f2036e8f3e9befebf88e6"
+checksum = "8a022e58a142a46fea340d68012b9201c094e93ec3d033a944a24f8fd4a4f09a"
 dependencies = [
  "bitflags",
  "cexpr",
@@ -158,6 +158,7 @@ dependencies = [
  "regex",
  "rustc-hash",
  "shlex",
+ "syn",
 ]
 
 [[package]]
@@ -1100,8 +1101,6 @@ dependencies = [
 [[package]]
 name = "mupdf"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c11b613118f9288ab8921149bf3973af1ceed1f93e55e8f4cb6c6257a22b70f9"
 dependencies = [
  "bitflags",
  "mupdf-sys",
@@ -1112,8 +1111,6 @@ dependencies = [
 [[package]]
 name = "mupdf-sys"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71c7d76d6511b505cf84c5373cf39dcd0f09ffde739291f62d5570310820430f"
 dependencies = [
  "bindgen",
  "cc",
