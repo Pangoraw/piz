@@ -460,7 +460,9 @@ impl PageRenderPipeline {
         device: &wgpu::Device,
         config: &wgpu::SurfaceConfiguration,
         shader: &wgpu::ShaderModule,
+        dark_mode: bool,
     ) -> Self {
+        dbg!(dark_mode);
         let texture_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[
@@ -499,7 +501,7 @@ impl PageRenderPipeline {
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: "fs_main",
+                entry_point: if dark_mode { "fs_main_dark" } else { "fs_main" },
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
                     blend: Some(wgpu::BlendState {
@@ -809,8 +811,9 @@ impl Page {
         shader: &wgpu::ShaderModule,
         doc: &mupdf::Document,
         page_count: i32,
+        dark_mode: bool,
     ) -> Result<Self, mupdf::Error> {
-        let render_pipeline = PageRenderPipeline::new(&device, &config, &shader);
+        let render_pipeline = PageRenderPipeline::new(&device, &config, &shader, dark_mode);
         let rendered_page = RenderedPage::new(doc, page_count)?;
         Ok(Self {
             render_pipeline,
@@ -1110,12 +1113,13 @@ struct State {
     render_nav_bar: bool,
     show_debug: bool,
 
+    dark_mode: bool,
     cached_query: String,
     background_color: wgpu::Color,
 }
 
 impl State {
-    async fn new(window: &Window) -> Self {
+    async fn new(window: &Window, dark_mode: bool) -> Self {
         let size = window.inner_size();
 
         let instance = wgpu::Instance::new(wgpu::Backends::all());
@@ -1169,6 +1173,7 @@ impl State {
             render_nav_bar: true,
             show_debug: false,
 
+            dark_mode,
             background_color: wgpu::Color {
                 r: 1.0, // Solarized: base1 RGBA(238, 232, 213, 1)
                 g: 1.0, // Solarized: base2 RGBA(253, 246, 227, 1)
@@ -1184,7 +1189,7 @@ impl State {
             return Ok(());
         }
 
-        let mut page = Page::new(&self.device, &self.config, &self.shader, doc, page_count)?;
+        let mut page = Page::new(&self.device, &self.config, &self.shader, doc, page_count, self.dark_mode)?;
         page.highlight_blocks()?;
         page.highlight_links()?;
         page.create_texture(
@@ -1440,7 +1445,7 @@ fn run() {
         .build(&event_loop)
         .unwrap();
 
-    let mut state = pollster::block_on(State::new(&window));
+    let mut state = pollster::block_on(State::new(&window, config.dark_mode));
     state.add_page(&doc, 0).unwrap();
     state.add_page(&doc, 1).unwrap();
 
@@ -1640,7 +1645,7 @@ fn run() {
                 if let Some((pos, ref_text)) = &current_ref {
                     let win_width = window.inner_size().width;
                     let (alignment, x) = if pos.x as u32 > win_width / 2 {
-                        (egui::Align2::RIGHT_TOP,pos.x as f32 - win_width as f32 )
+                        (egui::Align2::RIGHT_TOP, pos.x as f32 - win_width as f32)
                     } else {
                         (egui::Align2::LEFT_TOP, pos.x as f32)
                     };

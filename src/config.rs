@@ -5,6 +5,7 @@ use std::path::PathBuf;
 pub struct Config {
     pub(crate) zotero_dir: Option<PathBuf>,
     pub(crate) background_color: (f64, f64, f64, f64),
+    pub(crate) dark_mode: bool,
 }
 
 impl Default for Config {
@@ -12,6 +13,7 @@ impl Default for Config {
         Self {
             zotero_dir: None,
             background_color: (1., 1., 1., 1.),
+            dark_mode: false,
         }
     }
 }
