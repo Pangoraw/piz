@@ -462,7 +462,6 @@ impl PageRenderPipeline {
         shader: &wgpu::ShaderModule,
         dark_mode: bool,
     ) -> Self {
-        dbg!(dark_mode);
         let texture_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[
@@ -901,7 +900,7 @@ impl Page {
         let is_probably_title = text.len() == 1 && matches!(text.chars().next(), Some('A'..='Z'));
 
         let text = text.strip_suffix(" et al.").unwrap_or(text);
-        let text = match text.split_once(" and ") {
+        let text = match text.split_once(" and ").or_else(|| text.split_once(" & ")) {
             Some((start, _)) => start,
             None => text,
         };
@@ -1102,6 +1101,10 @@ struct State {
     shader: wgpu::ShaderModule,
 
     size: winit::dpi::PhysicalSize<u32>,
+    cursor_position: winit::dpi::PhysicalPosition<f64>,
+    cursor: egui::CursorIcon,
+
+    doc: mupdf::Document,
 
     pages: Vec<Page>,
     position: Point,
@@ -1118,8 +1121,10 @@ struct State {
     background_color: wgpu::Color,
 }
 
+type ReferenceBox = (winit::dpi::PhysicalPosition<f64>, String);
+
 impl State {
-    async fn new(window: &Window, dark_mode: bool) -> Self {
+    async fn new(window: &Window, doc: mupdf::Document, dark_mode: bool) -> Self {
         let size = window.inner_size();
 
         let instance = wgpu::Instance::new(wgpu::Backends::all());
@@ -1160,9 +1165,13 @@ impl State {
             device,
             queue,
             config,
-            size,
             shader,
 
+            size,
+            cursor_position: Default::default(),
+            cursor: Default::default(),
+
+            doc,
             pages: vec![],
             position: Point { x: 0., y: 0. },
             page_count: 0,
@@ -1184,12 +1193,19 @@ impl State {
         }
     }
 
-    fn add_page(&mut self, doc: &mupdf::Document, page_count: i32) -> Result<(), mupdf::Error> {
-        if page_count >= doc.page_count()? {
+    fn add_page(&mut self, page_count: i32) -> Result<(), mupdf::Error> {
+        if page_count >= self.doc.page_count()? {
             return Ok(());
         }
 
-        let mut page = Page::new(&self.device, &self.config, &self.shader, doc, page_count, self.dark_mode)?;
+        let mut page = Page::new(
+            &self.device,
+            &self.config,
+            &self.shader,
+            &self.doc,
+            page_count,
+            self.dark_mode,
+        )?;
         page.highlight_blocks()?;
         page.highlight_links()?;
         page.create_texture(
@@ -1215,7 +1231,7 @@ impl State {
         self.create_texture(new_size.width, new_size.height, true);
     }
 
-    fn update(&mut self, doc: &mupdf::Document) -> Result<(), mupdf::Error> {
+    fn update(&mut self) -> Result<(), mupdf::Error> {
         let mut offset = 0.;
         for (i, page) in self.pages.iter_mut().enumerate() {
             page.update(
@@ -1235,7 +1251,7 @@ impl State {
         // offset sums the physical height of all pages
         // if offset is now in frame, create a page.
         if -self.position.y < offset && -self.position.y + self.size.height as f32 > offset {
-            self.add_page(doc, self.pages.len() as i32).unwrap();
+            self.add_page(self.pages.len() as i32).unwrap();
         }
 
         Ok(())
@@ -1342,28 +1358,20 @@ impl State {
         None
     }
 
-    fn load_until(
-        &mut self,
-        doc: &mupdf::Document,
-        page_number: usize,
-    ) -> Result<(), mupdf::Error> {
+    fn load_until(&mut self, page_number: usize) -> Result<(), mupdf::Error> {
         // Add missing pages
         while self.pages.len() <= page_number {
-            self.add_page(doc, self.pages.len() as i32)?;
+            self.add_page(self.pages.len() as i32)?;
         }
         Ok(())
     }
 
-    fn navigate_to(
-        &mut self,
-        doc: &mupdf::Document,
-        page_number: usize,
-    ) -> Result<(), mupdf::Error> {
-        if page_number >= doc.page_count()? as usize {
+    fn navigate_to(&mut self, page_number: usize) -> Result<(), mupdf::Error> {
+        if page_number >= self.doc.page_count()? as usize {
             return Ok(());
         }
 
-        self.load_until(doc, page_number)?;
+        self.load_until(page_number)?;
 
         self.position.y = 0.;
         for page in self.pages.iter().take(page_number) {
@@ -1375,11 +1383,11 @@ impl State {
     }
 
     /// Clears everything and render the document again and then moves at the previous position.
-    fn rerender_document(&mut self, doc: &mupdf::Document) -> Result<(), mupdf::Error> {
+    fn rerender_document(&mut self) -> Result<(), mupdf::Error> {
         let page_count = self.page_count;
         let y = self.position.y;
         self.clear_pages();
-        self.navigate_to(doc, page_count)?;
+        self.navigate_to(page_count)?;
         self.position.y = y;
         Ok(())
     }
@@ -1401,13 +1409,56 @@ impl State {
         self.pages = vec![];
         self.page_count = 0;
     }
+
+    fn compute_cursor(
+        &mut self,
+        position: winit::dpi::PhysicalPosition<f64>,
+    ) -> Option<ReferenceBox> {
+        let mut current_ref = None;
+        if let Some(link) = self.find_hovering_link(position) {
+            if let Some(dest) = link.dest {
+                let page_number = dest.location.page as usize;
+                if page_number < self.doc.page_count().unwrap() as usize {
+                    self.load_until(page_number).unwrap();
+
+                    let link_text = self.pages.iter().find_map(|page| {
+                        let pos = page.render_pipeline.from_pos_to_page(self.cursor_position);
+                        match page.find_link_text(&pos) {
+                            Some(s) if !s.is_empty() => Some(s),
+                            _ => None,
+                        }
+                    });
+                    if let Some(link_text) = link_text {
+                        match self.pages[page_number]
+                            .find_matching_reference(&link_text, dest.x, dest.y)
+                        {
+                            Some(ref_text) => {
+                                current_ref = Some((
+                                    winit::dpi::PhysicalPosition::new(position.x, position.y + 10.),
+                                    ref_text,
+                                ))
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            self.cursor = egui::CursorIcon::PointingHand;
+        } else if self.hovers_line(position) {
+            self.cursor = egui::CursorIcon::Text;
+            current_ref = None;
+        } else {
+            self.cursor = Default::default();
+            current_ref = None;
+        }
+        self.cursor_position = position;
+        return current_ref;
+    }
 }
 
 const SCROLL_DELTA: f32 = 20.;
 
 fn run() {
-    env_logger::init();
-
     let path = std::env::current_exe().unwrap();
     let repo_dir = path.parent().unwrap().parent().unwrap().parent().unwrap();
 
@@ -1424,7 +1475,7 @@ fn run() {
         String::from(path.file_name().unwrap().to_str().unwrap())
     };
 
-    let mut doc = mupdf::Document::open(&filename).unwrap();
+    let doc = mupdf::Document::open(&filename).unwrap();
     let (winwidth, winheight) = {
         let first_page = doc.load_page(0).unwrap();
         let pixmap = first_page
@@ -1445,9 +1496,9 @@ fn run() {
         .build(&event_loop)
         .unwrap();
 
-    let mut state = pollster::block_on(State::new(&window, config.dark_mode));
-    state.add_page(&doc, 0).unwrap();
-    state.add_page(&doc, 1).unwrap();
+    let mut state = pollster::block_on(State::new(&window, doc, config.dark_mode));
+    state.add_page(0).unwrap();
+    state.add_page(1).unwrap();
 
     state.background_color = wgpu::Color {
         r: config.background_color.0,
@@ -1467,16 +1518,13 @@ fn run() {
         None => None,
     };
 
-    let mut cursor: Option<egui::CursorIcon> = None;
-    let mut cursor_position = winit::dpi::PhysicalPosition { x: 0., y: 0. };
-
     let mut last_render_time = std::time::Instant::now();
     let mut query = String::new();
 
-    let mut outlines = doc.outlines().unwrap();
+    let mut outlines = state.doc.outlines().unwrap();
     let mut show_table_of_content = false;
 
-    let mut current_ref: Option<(winit::dpi::PhysicalPosition<f64>, String)> = None;
+    let mut current_ref: Option<ReferenceBox> = None;
 
     event_loop.run(move |event, _, control_flow| match event {
         Event::WindowEvent {
@@ -1487,48 +1535,7 @@ fn run() {
                 match event {
                     WindowEvent::CloseRequested => control_flow.set_exit(),
                     WindowEvent::CursorMoved { position, .. } => {
-                        // TODO: Recompute page position based on scrolling too.
-                        if let Some(link) = state.find_hovering_link(*position) {
-                            if let Some(dest) = link.dest {
-                                let page_number = dest.location.page as usize;
-                                if page_number < doc.page_count().unwrap() as usize {
-                                    state.load_until(&doc, page_number).unwrap();
-
-                                    let link_text = state.pages.iter().find_map(|page| {
-                                        let pos =
-                                            page.render_pipeline.from_pos_to_page(cursor_position);
-                                        match page.find_link_text(&pos) {
-                                            Some(s) if !s.is_empty() => Some(s),
-                                            _ => None,
-                                        }
-                                    });
-                                    if let Some(link_text) = link_text {
-                                        match state.pages[page_number]
-                                            .find_matching_reference(&link_text, dest.x, dest.y)
-                                        {
-                                            Some(ref_text) => {
-                                                current_ref = Some((
-                                                    winit::dpi::PhysicalPosition::new(
-                                                        position.x,
-                                                        position.y + 10.,
-                                                    ),
-                                                    ref_text,
-                                                ))
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                }
-                            }
-                            cursor = Some(egui::CursorIcon::PointingHand);
-                        } else if state.hovers_line(*position) {
-                            cursor = Some(egui::CursorIcon::Text);
-                            current_ref = None;
-                        } else {
-                            cursor = None;
-                            current_ref = None;
-                        }
-                        cursor_position = *position;
+                        current_ref = state.compute_cursor(*position);
                     }
                     WindowEvent::MouseWheel {
                         delta: winit::event::MouseScrollDelta::LineDelta(xd, yd),
@@ -1536,6 +1543,7 @@ fn run() {
                     } => {
                         state.position.x += SCROLL_DELTA * xd;
                         state.position.y = (state.position.y + SCROLL_DELTA * yd).min(0.);
+                        current_ref = state.compute_cursor(state.cursor_position);
                     }
                     WindowEvent::MouseInput {
                         state: winit::event::ElementState::Pressed,
@@ -1544,21 +1552,22 @@ fn run() {
                             @ (winit::event::MouseButton::Left | winit::event::MouseButton::Right),
                         ..
                     } => {
-                        if let Some(link) = state.find_hovering_link(cursor_position) {
+                        if let Some(link) = state.find_hovering_link(state.cursor_position) {
                             if let Some(dest) = link.dest {
                                 let page_number = dest.location.page as usize;
-                                if page_number < doc.page_count().unwrap() as usize
+                                if page_number < state.doc.page_count().unwrap() as usize
                                     && matches!(button, winit::event::MouseButton::Left)
                                 {
-                                    state.navigate_to(&doc, page_number).unwrap();
+                                    state.navigate_to(page_number).unwrap();
                                 } else if let Some(link_text) =
                                     state.pages.iter().find_map(|page| {
                                         if !page.is_visible() {
                                             return None;
                                         }
 
-                                        let pos =
-                                            page.render_pipeline.from_pos_to_page(cursor_position);
+                                        let pos = page
+                                            .render_pipeline
+                                            .from_pos_to_page(state.cursor_position);
                                         match page.find_link_text(&pos) {
                                             Some(s) if !s.is_empty() => Some(s),
                                             _ => None,
@@ -1567,8 +1576,8 @@ fn run() {
                                 {
                                     current_ref = Some((
                                         winit::dpi::PhysicalPosition::new(
-                                            cursor_position.x,
-                                            cursor_position.y + 10.,
+                                            state.cursor_position.x,
+                                            state.cursor_position.y + 10.,
                                         ),
                                         link_text,
                                     ));
@@ -1598,10 +1607,10 @@ fn run() {
                         ..
                     } => match keycode {
                         VirtualKeyCode::Left if state.page_count > 0 => {
-                            state.navigate_to(&doc, state.page_count - 1).unwrap();
+                            state.navigate_to(state.page_count - 1).unwrap();
                         }
                         VirtualKeyCode::Right => {
-                            state.navigate_to(&doc, state.page_count + 1).unwrap();
+                            state.navigate_to(state.page_count + 1).unwrap();
                         }
                         VirtualKeyCode::Down => {
                             state.position.y -= 20.;
@@ -1613,9 +1622,9 @@ fn run() {
                             state.show_debug = !state.show_debug;
                         }
                         VirtualKeyCode::R => {
-                            doc = mupdf::Document::open(&filename).unwrap();
-                            outlines = doc.outlines().unwrap();
-                            state.rerender_document(&doc).unwrap();
+                            state.doc = mupdf::Document::open(&filename).unwrap();
+                            outlines = state.doc.outlines().unwrap();
+                            state.rerender_document().unwrap();
                         }
                         VirtualKeyCode::T => {
                             show_table_of_content = !show_table_of_content;
@@ -1667,7 +1676,7 @@ fn run() {
                                 egui::RichText::new(format!(
                                     "{}/{}",
                                     state.page_count + 1,
-                                    doc.page_count().unwrap()
+                                    state.doc.page_count().unwrap()
                                 ))
                                 .size(20.),
                             );
@@ -1709,6 +1718,29 @@ fn run() {
                         }
                     });
 
+                /*
+                egui::Window::new("Error")
+                    .resizable(false)
+                    .collapsible(false)
+                    .show(&ctx, |ui| {
+                        let mut job = egui::text::LayoutJob::default();
+                        let error_msg = "something went wrong.";
+
+                        job.append(
+                            error_msg,
+                            0.,
+                            egui::TextFormat::simple(
+                                egui::FontId {
+                                    size: 25.,
+                                    family: egui::text::FontFamily::Monospace,
+                                },
+                                egui::Color32::LIGHT_RED,
+                            ),
+                        );
+                        ui.label(job);
+                    });
+                */
+
                 egui::Window::new("Debug Window")
                     .open(&mut state.show_debug)
                     .show(&ctx, |ui| {
@@ -1728,10 +1760,8 @@ fn run() {
                         last_render_time = std::time::Instant::now();
                     });
             });
-            if let Some(cursor) = cursor {
-                if !ctx.is_pointer_over_area() {
-                    output.platform_output.cursor_icon = cursor;
-                }
+            if !ctx.is_pointer_over_area() {
+                output.platform_output.cursor_icon = state.cursor;
             }
             egui_state.handle_platform_output(&window, &ctx, output.platform_output);
             if output.repaint_after.is_zero() {
@@ -1751,9 +1781,9 @@ fn run() {
                         filename.to_string()
                     };
 
-                    doc = mupdf::Document::open(&filename).unwrap();
-                    outlines = doc.outlines().unwrap();
-                    state.rerender_document(&doc).unwrap();
+                    state.doc = mupdf::Document::open(&filename).unwrap();
+                    outlines = state.doc.outlines().unwrap();
+                    state.rerender_document().unwrap();
                 }
             }
 
@@ -1761,7 +1791,7 @@ fn run() {
             let textures = output.textures_delta;
 
             state.resize(winsize);
-            state.update(&doc).unwrap();
+            state.update().unwrap();
             state.search(&query).unwrap();
 
             match state.render(&mut rp, primitives, textures) {
@@ -1780,6 +1810,8 @@ fn run() {
 }
 
 fn main() {
+    env_logger::init();
+
     let home_dir = home::home_dir().unwrap();
     let log_file = std::fs::File::options()
         .append(true)
