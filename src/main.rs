@@ -1262,13 +1262,14 @@ impl State {
         rp: &mut egui_wgpu::renderer::RenderPass,
         primitives: Vec<egui::epaint::ClippedPrimitive>,
         textures: egui::TexturesDelta,
+        scale_factor: f64,
     ) -> Result<(), wgpu::SurfaceError> {
         let quad_width = self.size.width;
         let quad_height = self.size.height;
 
         let descriptor = egui_wgpu::renderer::ScreenDescriptor {
             size_in_pixels: [quad_width, quad_height],
-            pixels_per_point: 1.0, // What should go there ? window.scale_factor() ?
+            pixels_per_point: scale_factor as f32, // What should go there ? window.scale_factor() ?
         };
 
         for (id, image_delta) in textures.set {
@@ -1794,7 +1795,8 @@ fn run() {
             state.update().unwrap();
             state.search(&query).unwrap();
 
-            match state.render(&mut rp, primitives, textures) {
+            let scale_factor = window.scale_factor();
+            match state.render(&mut rp, primitives, textures, scale_factor) {
                 Ok(_) => {}
 
                 Err(wgpu::SurfaceError::Lost) => state.resize(winsize),
