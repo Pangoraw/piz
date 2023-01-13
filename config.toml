@@ -1,16 +1,16 @@
 # Hello world
 
-light_background_color = [ # Solarize light
+background_color = [ # Solarize light
  0.93,
  0.91,
  0.84,
  1.0,
 ]
-background_color = [ # Solarize dark
+dark_background_color = [ # Solarize dark
  0.108,
  0.108,
  0.150,
  1.0,
 ]
-dark_mode = true
+dark_mode = false
 zotero_dir = "/home/pberg/snap/zotero-snap/common/Zotero/"

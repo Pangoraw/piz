@@ -94,14 +94,14 @@ impl QuadRenderer {
         }
 
         self.changed = changed;
-        return changed;
+        changed
     }
 
     /// Transforms coordinates from the texture in [0, 1]
     /// to the screen/quad coordinates frame in [0, 1].
     pub fn from_texture(&self, x: f32, y: f32) -> Point {
-        let quad_x = self.x as f32 + x * self.texture_width as f32;
-        let quad_y = self.y as f32 + y * self.texture_height as f32;
+        let quad_x = self.x + x * self.texture_width as f32;
+        let quad_y = self.y + y * self.texture_height as f32;
 
         Point {
             x: quad_x / self.quad_width as f32,
@@ -121,8 +121,8 @@ impl QuadRenderer {
     /// Transforms coordinates from the quad on the screen in [0, 1]
     /// to the texture coordinates frame in [0, 1].
     pub fn from_quad(&self, x: f32, y: f32) -> Point {
-        let text_x = x * self.quad_width as f32 - self.x as f32;
-        let text_y = y * self.quad_height as f32 - self.y as f32;
+        let text_x = x * self.quad_width as f32 - self.x;
+        let text_y = y * self.quad_height as f32 - self.y;
 
         Point {
             x: text_x / self.texture_width as f32,
@@ -154,7 +154,7 @@ impl QuadRenderer {
         let (x0, y0) = self.from_texture(0., 0.).to_vertex_space();
         let (x1, y1) = self.from_texture(1., 1.).to_vertex_space();
 
-        return [
+        [
             Vertex {
                 position: [x0, y0, 0.0],
                 tex_coords: [0.0, 0.0],
@@ -171,7 +171,7 @@ impl QuadRenderer {
                 position: [x0, y1, 0.0],
                 tex_coords: [0.0, 1.0],
             }, // D
-        ];
+        ]
     }
 }
 
@@ -277,12 +277,12 @@ impl BlocksRenderPipeline {
             label: Some("Render Pipeline"),
             layout: Some(&render_pipeline_layout),
             vertex: wgpu::VertexState {
-                module: &shader,
+                module: shader,
                 entry_point: "quad_vs_main",
                 buffers: &[QuadVertex::desc()],
             },
             fragment: Some(wgpu::FragmentState {
-                module: &shader,
+                module: shader,
                 entry_point: "quad_fs_main",
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
@@ -347,14 +347,12 @@ impl BlocksRenderPipeline {
         let vertices: Vec<QuadVertex> = self
             .quads
             .iter()
-            .map(|q| q.get_vertices(renderer, &self.normal_color))
-            .flatten()
+            .flat_map(|q| q.get_vertices(renderer, &self.normal_color))
             .collect();
         let indices: Vec<u16> = (0..4 * self.quads.len())
             .step_by(4)
             .map(|i| i as u16)
-            .map(|i| [i + 0, i + 2, i + 1, i + 0, i + 3, i + 2])
-            .flatten()
+            .flat_map(|i| [i + 0, i + 2, i + 1, i + 0, i + 3, i + 2])
             .collect();
 
         if self.capacity <= self.quads.len() {
@@ -404,7 +402,7 @@ impl BlocksRenderPipeline {
     /// Returns whether or not any quad from this render pipeline contains the
     /// given point in texture space [0, 1].
     fn hovers_quad(&self, point: &Point) -> bool {
-        return self.find_hovering(std::iter::repeat(()), point).is_some();
+        self.find_hovering(std::iter::repeat(()), point).is_some()
     }
 
     fn clear_blocks(&mut self) {
@@ -462,6 +460,65 @@ impl PageRenderPipeline {
         shader: &wgpu::ShaderModule,
         dark_mode: bool,
     ) -> Self {
+        let (render_pipeline, texture_bind_group_layout) =
+            Self::generate_render_pipeline(device, config, shader, dark_mode);
+
+        let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Vertex Buffer"),
+            mapped_at_creation: false,
+            size: (4 * std::mem::size_of::<Vertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Index Buffer"),
+            contents: bytemuck::cast_slice(INDICES),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let block_render_pipeline = BlocksRenderPipeline::new(device, 0, config, shader);
+        let line_render_pipeline = BlocksRenderPipeline::new(device, 0, config, shader);
+        let link_render_pipeline = BlocksRenderPipeline::new(device, 0, config, shader);
+        let link_target_render_pipeline = BlocksRenderPipeline::new(device, 0, config, shader);
+        let search_render_pipeline = BlocksRenderPipeline::new(device, 0, config, shader);
+
+        PageRenderPipeline {
+            texture: None,
+            render_pipeline,
+            vertex_buffer,
+            index_buffer,
+
+            bind_group_layout: texture_bind_group_layout,
+            bind_group: None,
+
+            renderer: QuadRenderer::default(),
+
+            block_render_pipeline,
+            line_render_pipeline,
+            link_render_pipeline,
+            link_target_render_pipeline,
+            search_render_pipeline,
+        }
+    }
+
+    fn set_render_pipeline(
+        &mut self,
+        device: &wgpu::Device,
+        config: &wgpu::SurfaceConfiguration,
+        shader: &wgpu::ShaderModule,
+        dark_mode: bool,
+    ) {
+        let (render_pipeline, texture_bind_group_layout) =
+            Self::generate_render_pipeline(device, config, shader, dark_mode);
+        self.render_pipeline = render_pipeline;
+        self.bind_group_layout = texture_bind_group_layout;
+    }
+
+    fn generate_render_pipeline(
+        device: &wgpu::Device,
+        config: &wgpu::SurfaceConfiguration,
+        shader: &wgpu::ShaderModule,
+        dark_mode: bool,
+    ) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout) {
         let texture_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[
@@ -494,12 +551,12 @@ impl PageRenderPipeline {
             label: Some("Render Pipeline"),
             layout: Some(&render_pipeline_layout),
             vertex: wgpu::VertexState {
-                module: &shader,
+                module: shader,
                 entry_point: "vs_main",
                 buffers: &[Vertex::desc()],
             },
             fragment: Some(wgpu::FragmentState {
-                module: &shader,
+                module: shader,
                 entry_point: if dark_mode { "fs_main_dark" } else { "fs_main" },
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
@@ -531,43 +588,7 @@ impl PageRenderPipeline {
             },
             multiview: None,
         });
-        let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Vertex Buffer"),
-            mapped_at_creation: false,
-            size: (4 * std::mem::size_of::<Vertex>()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        });
-        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Index Buffer"),
-            contents: bytemuck::cast_slice(INDICES),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-
-        let block_render_pipeline = BlocksRenderPipeline::new(&device, 0, &config, &shader);
-        let line_render_pipeline = BlocksRenderPipeline::new(&device, 0, &config, &shader);
-        let link_render_pipeline = BlocksRenderPipeline::new(&device, 0, &config, &shader);
-        let link_target_render_pipeline = BlocksRenderPipeline::new(&device, 0, &config, &shader);
-        let search_render_pipeline = BlocksRenderPipeline::new(&device, 0, &config, &shader);
-
-        let page_render_pipeline = PageRenderPipeline {
-            texture: None,
-            render_pipeline,
-            vertex_buffer,
-            index_buffer,
-
-            bind_group_layout: texture_bind_group_layout,
-            bind_group: None,
-
-            renderer: QuadRenderer::default(),
-
-            block_render_pipeline,
-            line_render_pipeline,
-            link_render_pipeline,
-            link_target_render_pipeline,
-            search_render_pipeline,
-        };
-
-        return page_render_pipeline;
+        (render_pipeline, texture_bind_group_layout)
     }
 
     /// Returns wether or not parts of the rendered texture are visible on the screen.
@@ -629,15 +650,14 @@ impl PageRenderPipeline {
     }
 
     fn hovers_link(&self, pos: winit::dpi::PhysicalPosition<f64>) -> bool {
-        return self
+        self
             .link_render_pipeline
-            .hovers_quad(&self.from_pos_to_page(pos));
+            .hovers_quad(&self.from_pos_to_page(pos))
     }
 
     fn hovers_line(&self, pos: winit::dpi::PhysicalPosition<f64>) -> bool {
-        return self
-            .line_render_pipeline
-            .hovers_quad(&self.from_pos_to_page(pos));
+        self.line_render_pipeline
+            .hovers_quad(&self.from_pos_to_page(pos))
     }
 
     pub fn create_texture(
@@ -730,7 +750,7 @@ impl PageRenderPipeline {
         }
 
         render_pass.set_pipeline(&self.render_pipeline);
-        render_pass.set_bind_group(0, &self.bind_group.as_ref().unwrap(), &[]);
+        render_pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
 
         if self.renderer.changed {
             let vertices = self.renderer.get_vertices();
@@ -759,7 +779,7 @@ impl PageRenderPipeline {
 
     fn from_pos_to_page(&self, pos: winit::dpi::PhysicalPosition<f64>) -> Point {
         let point = self.renderer.from_abs_quad(pos.x as f32, pos.y as f32);
-        return self.renderer.from_quad(point.x, point.y);
+        self.renderer.from_quad(point.x, point.y)
     }
 }
 
@@ -812,7 +832,7 @@ impl Page {
         page_count: i32,
         dark_mode: bool,
     ) -> Result<Self, mupdf::Error> {
-        let render_pipeline = PageRenderPipeline::new(&device, &config, &shader, dark_mode);
+        let render_pipeline = PageRenderPipeline::new(device, config, shader, dark_mode);
         let rendered_page = RenderedPage::new(doc, page_count)?;
         Ok(Self {
             render_pipeline,
@@ -899,6 +919,14 @@ impl Page {
     fn find_matching_reference(&self, text: &str, x: f32, y: f32) -> Option<String> {
         let is_probably_title = text.len() == 1 && matches!(text.chars().next(), Some('A'..='Z'));
 
+        // Sometimes reference texts gets leading and terminating 'i'.
+        // We remove them event though the ideal solution would be to not have them in the first
+        // place.
+        // Example: 'i33' -> '33'
+        let text = text.strip_prefix('i').unwrap_or(text);
+        let text = text.strip_suffix('i').unwrap_or(text);
+        let text = text.trim();
+
         let text = text.strip_suffix(" et al.").unwrap_or(text);
         let text = match text.split_once(" and ").or_else(|| text.split_once(" & ")) {
             Some((start, _)) => start,
@@ -906,7 +934,7 @@ impl Page {
         };
 
         fn all_numerics(s: &str) -> bool {
-            s.chars().all(|c| c >= '0' && c <= '9')
+            s.chars().all(|c| ('0'..='9').contains(&c))
         }
 
         for block in self.page.textpage.blocks() {
@@ -932,10 +960,10 @@ impl Page {
                     {
                         block_match = true;
                     } else if all_numerics(text) {
-                        if text.len() == 4 && line_text.contains(&format!("{}.", text)) {
+                        if text.len() == 4 && line_text.contains(&format!("{}.", text)) 
+                            || text.len() <= 3 && line_text.starts_with(&format!("{}.",text))
+                        {
                             // This is a year like 2012, this one is probably not great
-                            block_match = true;
-                        } else if text.len() <= 3 && line_text.starts_with(&format!("{}.",text)) {
                             block_match = true;
                         }
                     } else if !all_numerics(text) && line_text.contains(text) {
@@ -1119,12 +1147,19 @@ struct State {
     dark_mode: bool,
     cached_query: String,
     background_color: wgpu::Color,
+    dark_background_color: wgpu::Color,
 }
 
 type ReferenceBox = (winit::dpi::PhysicalPosition<f64>, String);
 
 impl State {
-    async fn new(window: &Window, doc: mupdf::Document, dark_mode: bool) -> Self {
+    async fn new(
+        window: &Window,
+        doc: mupdf::Document,
+        dark_mode: bool,
+        background_color: wgpu::Color,
+        dark_background_color: wgpu::Color,
+    ) -> Self {
         let size = window.inner_size();
 
         let instance = wgpu::Instance::new(wgpu::Backends::all());
@@ -1183,12 +1218,8 @@ impl State {
             show_debug: false,
 
             dark_mode,
-            background_color: wgpu::Color {
-                r: 1.0, // Solarized: base1 RGBA(238, 232, 213, 1)
-                g: 1.0, // Solarized: base2 RGBA(253, 246, 227, 1)
-                b: 1.0,
-                a: 1.0,
-            },
+            background_color,
+            dark_background_color,
             cached_query: String::new(),
         }
     }
@@ -1296,7 +1327,11 @@ impl State {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(self.background_color),
+                        load: wgpu::LoadOp::Clear(if self.dark_mode {
+                            self.dark_background_color
+                        } else {
+                            self.background_color
+                        }),
                         store: true,
                     },
                 })],
@@ -1379,6 +1414,7 @@ impl State {
             self.position.y -= page.physical_height() as f32;
         }
         self.page_count = page_number;
+        self.compute_cursor(); // TODO: re-assigne reference by moving it into State
 
         Ok(())
     }
@@ -1411,10 +1447,8 @@ impl State {
         self.page_count = 0;
     }
 
-    fn compute_cursor(
-        &mut self,
-        position: winit::dpi::PhysicalPosition<f64>,
-    ) -> Option<ReferenceBox> {
+    fn compute_cursor(&mut self) -> Option<ReferenceBox> {
+        let position = self.cursor_position;
         let mut current_ref = None;
         if let Some(link) = self.find_hovering_link(position) {
             if let Some(dest) = link.dest {
@@ -1430,16 +1464,13 @@ impl State {
                         }
                     });
                     if let Some(link_text) = link_text {
-                        match self.pages[page_number]
+                        if let Some(ref_text) = self.pages[page_number]
                             .find_matching_reference(&link_text, dest.x, dest.y)
                         {
-                            Some(ref_text) => {
-                                current_ref = Some((
-                                    winit::dpi::PhysicalPosition::new(position.x, position.y + 10.),
-                                    ref_text,
-                                ))
-                            }
-                            _ => {}
+                            current_ref = Some((
+                                winit::dpi::PhysicalPosition::new(position.x, position.y + 10.),
+                                ref_text,
+                            ))
                         }
                     }
                 }
@@ -1453,7 +1484,20 @@ impl State {
             current_ref = None;
         }
         self.cursor_position = position;
-        return current_ref;
+        current_ref
+    }
+
+    /// Resets all page render pipelines to use the given dark mode values
+    fn set_dark_mode(&mut self, dark_mode: bool) {
+        self.dark_mode = dark_mode;
+        for page in self.pages.iter_mut() {
+            page.render_pipeline.set_render_pipeline(
+                &self.device,
+                &self.config,
+                &self.shader,
+                dark_mode,
+            );
+        }
     }
 }
 
@@ -1463,7 +1507,7 @@ fn run() {
     let path = std::env::current_exe().unwrap();
     let repo_dir = path.parent().unwrap().parent().unwrap().parent().unwrap();
 
-    let config = config::Config::from_file(repo_dir.join("config.toml").into()).unwrap();
+    let config = config::Config::from_file(repo_dir.join("config.toml")).unwrap();
     let args: Vec<String> = std::env::args().collect();
 
     let exe_name = &args[0];
@@ -1497,19 +1541,27 @@ fn run() {
         .build(&event_loop)
         .unwrap();
 
-    let mut state = pollster::block_on(State::new(&window, doc, config.dark_mode));
+    fn to_wgpu_color(c: (f64, f64, f64, f64)) -> wgpu::Color {
+        let (r, g, b, a) = c;
+        wgpu::Color { r, g, b, a }
+    }
+
+    let mut state = pollster::block_on(State::new(
+        &window,
+        doc,
+        config.dark_mode,
+        to_wgpu_color(config.background_color),
+        to_wgpu_color(config.dark_background_color),
+    ));
     state.add_page(0).unwrap();
     state.add_page(1).unwrap();
 
-    state.background_color = wgpu::Color {
-        r: config.background_color.0,
-        g: config.background_color.1,
-        b: config.background_color.2,
-        a: config.background_color.3,
-    };
-
     let mut egui_state = egui_winit::State::new(&event_loop);
-    let mut ctx = egui::Context::default();
+    let ctx = egui::Context::default();
+
+    if !state.dark_mode {
+        ctx.set_visuals(egui::Visuals::light());
+    }
 
     let texture_format = state.surface.get_supported_formats(&state.adapter)[0];
     let mut rp = egui_wgpu::renderer::RenderPass::new(&state.device, texture_format, 1);
@@ -1532,11 +1584,12 @@ fn run() {
             ref event,
             window_id,
         } if window_id == window.id() => {
-            if !egui_state.on_event(&mut ctx, &event) {
+            if !egui_state.on_event(&ctx, event) {
                 match event {
                     WindowEvent::CloseRequested => control_flow.set_exit(),
                     WindowEvent::CursorMoved { position, .. } => {
-                        current_ref = state.compute_cursor(*position);
+                        state.cursor_position = *position;
+                        current_ref = state.compute_cursor();
                     }
                     WindowEvent::MouseWheel {
                         delta: winit::event::MouseScrollDelta::LineDelta(xd, yd),
@@ -1544,7 +1597,7 @@ fn run() {
                     } => {
                         state.position.x += SCROLL_DELTA * xd;
                         state.position.y = (state.position.y + SCROLL_DELTA * yd).min(0.);
-                        current_ref = state.compute_cursor(state.cursor_position);
+                        current_ref = state.compute_cursor();
                     }
                     WindowEvent::MouseInput {
                         state: winit::event::ElementState::Pressed,
@@ -1583,7 +1636,7 @@ fn run() {
                                         link_text,
                                     ));
                                 }
-                            } else {
+                            } else if matches!(button, winit::event::MouseButton::Left) {
                                 webbrowser::open(&link.uri).unwrap();
                             }
                         }
@@ -1601,6 +1654,7 @@ fn run() {
                                         | VirtualKeyCode::D
                                         | VirtualKeyCode::R
                                         | VirtualKeyCode::T
+                                        | VirtualKeyCode::N
                                         | VirtualKeyCode::Slash),
                                     ),
                                 ..
@@ -1615,9 +1669,11 @@ fn run() {
                         }
                         VirtualKeyCode::Down => {
                             state.position.y -= 20.;
+                            current_ref = state.compute_cursor();
                         }
                         VirtualKeyCode::Up => {
                             state.position.y = (state.position.y + 20.).min(0.);
+                            current_ref = state.compute_cursor();
                         }
                         VirtualKeyCode::D => {
                             state.show_debug = !state.show_debug;
@@ -1635,6 +1691,9 @@ fn run() {
                                 bar.toggle_shown();
                             }
                         }
+                        VirtualKeyCode::N => {
+                            state.set_dark_mode(!state.dark_mode);
+                        }
                         _ => {}
                     },
                     WindowEvent::Resized(physical_size) => {
@@ -1650,6 +1709,14 @@ fn run() {
         Event::RedrawRequested(window_id) if window_id == window.id() => {
             let winsize = window.inner_size();
 
+            if ctx.style().visuals.dark_mode != state.dark_mode {
+                ctx.set_visuals(if state.dark_mode {
+                    egui::Visuals::dark()
+                } else {
+                    egui::Visuals::light()
+                })
+            }
+
             let mut should_refresh_doc = false;
             let mut output = ctx.run(egui_state.take_egui_input(&window), |ctx| {
                 if let Some((pos, ref_text)) = &current_ref {
@@ -1664,13 +1731,13 @@ fn run() {
                         .title_bar(false)
                         .collapsible(false)
                         .resizable(false)
-                        .show(&ctx, |ui| {
+                        .show(ctx, |ui| {
                             ui.monospace(ref_text);
                         });
                 }
 
                 if state.render_nav_bar {
-                    egui::TopBottomPanel::bottom("bottom_panel").show(&ctx, |ui| {
+                    egui::TopBottomPanel::bottom("bottom_panel").show(ctx, |ui| {
                         ui.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.label(
@@ -1709,11 +1776,40 @@ fn run() {
 
                 egui::Window::new("Table of Content")
                     .open(&mut show_table_of_content)
-                    .show(&ctx, |ui| {
+                    .show(ctx, |ui| {
+                        let mut selected = false;
                         for outline in &outlines {
-                            egui::CollapsingHeader::new(&outline.title).show(ui, |ui| {
+                            let is_selected = if let Some(page_number) = outline.page {
+                                if page_number as usize >= state.page_count && !selected {
+                                    selected = true;
+                                    true
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            };
+
+                            egui::CollapsingHeader::new({
+                                let txt = egui::RichText::new(&outline.title);
+                                if is_selected {
+                                    txt
+                                } else {
+                                    txt.small()
+                                }
+                            })
+                            .show(ui, |ui| {
                                 for outline in &outline.down {
-                                    ui.label(&outline.title);
+                                    if let Some(page_number) = outline.page {
+                                        if ui
+                                            .small_button(
+                                                egui::RichText::new(&outline.title).small(),
+                                            )
+                                            .clicked()
+                                        {
+                                            state.navigate_to(page_number as usize).unwrap();
+                                        }
+                                    }
                                 }
                             });
                         }
@@ -1744,9 +1840,10 @@ fn run() {
 
                 egui::Window::new("Debug Window")
                     .open(&mut state.show_debug)
-                    .show(&ctx, |ui| {
+                    .show(ctx, |ui| {
                         ui.text_edit_singleline(&mut query);
 
+                        egui::global_dark_light_mode_buttons(ui);
                         should_refresh_doc = ui.button("Refresh doc").clicked();
 
                         ui.checkbox(&mut state.render_lines, "Render lines");
@@ -1769,6 +1866,11 @@ fn run() {
                 control_flow.set_poll();
             } else {
                 control_flow.set_wait()
+            }
+
+            let visuals = &ctx.style().visuals;
+            if visuals.dark_mode != state.dark_mode {
+                state.set_dark_mode(visuals.dark_mode);
             }
 
             if let Some(bar) = bar.as_mut() {
