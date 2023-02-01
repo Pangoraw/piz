@@ -1136,6 +1136,7 @@ struct State {
 
     pages: Vec<Page>,
     position: Point,
+    position_history: Vec<Point>,
     page_count: usize,
 
     render_blocks: bool,
@@ -1209,6 +1210,7 @@ impl State {
             doc,
             pages: vec![],
             position: Point { x: 0., y: 0. },
+            position_history: Vec::new(),
             page_count: 0,
 
             render_blocks: false,
@@ -1402,10 +1404,20 @@ impl State {
         Ok(())
     }
 
+    fn goback(&mut self) -> Option<ReferenceBox> {
+        let Some(position) = self.position_history.pop() else  {
+            return None;
+        };
+        self.position = position;
+        self.compute_cursor()
+    }
+
     fn navigate_to(&mut self, page_number: usize) -> Result<(), mupdf::Error> {
         if page_number >= self.doc.page_count()? as usize {
             return Ok(());
         }
+
+        self.position_history.push(self.position.clone());
 
         self.load_until(page_number)?;
 
@@ -1578,6 +1590,7 @@ fn run() {
     let mut show_table_of_content = false;
 
     let mut current_ref: Option<ReferenceBox> = None;
+    let mut ctrl_pressed = false;
 
     event_loop.run(move |event, _, control_flow| match event {
         Event::WindowEvent {
@@ -1586,6 +1599,18 @@ fn run() {
         } if window_id == window.id() => {
             if !egui_state.on_event(&ctx, event) {
                 match event {
+                    WindowEvent::ModifiersChanged(modifier @ ModifiersState { .. }) => {
+                        ctrl_pressed = modifier.ctrl();
+                    }
+                    WindowEvent::KeyboardInput {
+                        input:
+                            KeyboardInput {
+                                state: ElementState::Pressed,
+                                virtual_keycode: Some(VirtualKeyCode::Q),
+                                ..
+                            },
+                        ..
+                    } if ctrl_pressed => control_flow.set_exit(),
                     WindowEvent::CloseRequested => control_flow.set_exit(),
                     WindowEvent::CursorMoved { position, .. } => {
                         state.cursor_position = *position;
@@ -1602,17 +1627,21 @@ fn run() {
                     WindowEvent::MouseInput {
                         state: winit::event::ElementState::Pressed,
                         button:
-                            button
-                            @ (winit::event::MouseButton::Left | winit::event::MouseButton::Right),
+                            button @ (winit::event::MouseButton::Other(8)
+                            | winit::event::MouseButton::Left
+                            | winit::event::MouseButton::Right),
                         ..
                     } => {
-                        if let Some(link) = state.find_hovering_link(state.cursor_position) {
+                        if let winit::event::MouseButton::Other(8) = button {
+                            current_ref = state.goback();
+                        } else if let Some(link) = state.find_hovering_link(state.cursor_position) {
                             if let Some(dest) = link.dest {
                                 let page_number = dest.location.page as usize;
                                 if page_number < state.doc.page_count().unwrap() as usize
                                     && matches!(button, winit::event::MouseButton::Left)
                                 {
                                     state.navigate_to(page_number).unwrap();
+                                    current_ref = state.compute_cursor();
                                 } else if let Some(link_text) =
                                     state.pages.iter().find_map(|page| {
                                         if !page.is_visible() {
@@ -1663,9 +1692,11 @@ fn run() {
                     } => match keycode {
                         VirtualKeyCode::Left if state.page_count > 0 => {
                             state.navigate_to(state.page_count - 1).unwrap();
+                            current_ref = state.compute_cursor();
                         }
                         VirtualKeyCode::Right => {
                             state.navigate_to(state.page_count + 1).unwrap();
+                            current_ref = state.compute_cursor();
                         }
                         VirtualKeyCode::Down => {
                             state.position.y -= 20.;
@@ -1682,6 +1713,7 @@ fn run() {
                             state.doc = mupdf::Document::open(&filename).unwrap();
                             outlines = state.doc.outlines().unwrap();
                             state.rerender_document().unwrap();
+                            current_ref = state.compute_cursor();
                         }
                         VirtualKeyCode::T => {
                             show_table_of_content = !show_table_of_content;
@@ -1808,6 +1840,7 @@ fn run() {
                                             .clicked()
                                         {
                                             state.navigate_to(page_number as usize).unwrap();
+                                            current_ref = state.compute_cursor();
                                         }
                                     }
                                 }
@@ -1887,6 +1920,7 @@ fn run() {
                     state.doc = mupdf::Document::open(&filename).unwrap();
                     outlines = state.doc.outlines().unwrap();
                     state.rerender_document().unwrap();
+                    current_ref = state.compute_cursor();
                 }
             }
 
